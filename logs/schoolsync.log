@@ -1,0 +1,9 @@
+[2026-08-08 21.10.35] SchoolSync started
+[2026-08-08 21.10.35] Loaded local config
+[2026-08-08 21.10.35] No repository URL configured; self-update skipped
+[2026-08-08 21.10.35] Schedule day mismatch. Expected Friday, got Saturday
+[2026-08-08 21.13.14] SchoolSync started
+[2026-08-08 21.13.16] Remote config unavailable: The request was aborted: The connection was closed unexpectedly.
+[2026-08-08 21.13.16] Loaded local config
+[2026-08-08 21.13.16] Self-update failed: The request was aborted: The connection was closed unexpectedly.
+[2026-08-08 21.13.16] Schedule day mismatch. Expected Friday, got Saturday

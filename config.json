@@ -1,0 +1,23 @@
+{
+  "schedule": {
+    "day": "Friday",
+    "start": "14:00",
+    "end": "16:00"
+  },
+
+  "project": "Pertemuan-01.rbxl",
+
+  "browser": [
+    "https://classroom.google.com"
+  ],
+
+  "launcher": [
+    "edge",
+    "roblox"
+  ],
+
+  "shutdown": {
+    "enabled": true,
+    "warning": 10
+  }
+}
