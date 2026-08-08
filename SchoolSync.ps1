@@ -1,6 +1,7 @@
 param(
     [string]$RepositoryUrl = $env:SCHOOLSYNC_REPOSITORY_URL,
-    [switch]$SkipSelfUpdate
+    [switch]$SkipSelfUpdate,
+    [switch]$DryRun
 )
 
 $defaultRepositoryUrl = 'https://github.com/GrowNecro/SchoolSync.git'
@@ -180,7 +181,11 @@ function Invoke-AutoLauncher {
 }
 
 function Invoke-AutoShutdown {
-    param([object]$Config)
+    param(
+        [object]$Config,
+        [datetime]$EndTime = [datetime]::MinValue,
+        [switch]$DryRun
+    )
 
     if (-not ($Config.shutdown.enabled)) {
         Write-Log 'Auto-shutdown disabled'
@@ -189,6 +194,39 @@ function Invoke-AutoShutdown {
 
     $warningMinutes = if ($Config.shutdown.warning) { [int]$Config.shutdown.warning } else { 10 }
     Write-Log "Auto-shutdown enabled. Warning period: $warningMinutes minute(s)."
+
+    if ($EndTime -eq [datetime]::MinValue) {
+        Write-Log 'No schedule end time provided; skipping shutdown workflow'
+        return
+    }
+
+    if ($DryRun) {
+        Write-Log 'Dry run: skipping shutdown'
+        return
+    }
+
+    while ((Get-Date) -lt $EndTime) {
+        $remaining = [Math]::Ceiling(($EndTime - (Get-Date)).TotalMinutes)
+
+        if ($remaining -le $warningMinutes -and $remaining -gt 0) {
+            try {
+                Add-Type -AssemblyName System.Windows.Forms | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("Praktikum akan berakhir dalam $remaining menit.", 'SchoolSync', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                Write-Log "Displayed shutdown warning for $remaining minute(s)."
+            } catch {
+                Write-Log "Warning popup failed: $($_.Exception.Message)"
+            }
+        }
+
+        Start-Sleep -Seconds 30
+    }
+
+    try {
+        Write-Log 'Shutting down computer'
+        & shutdown.exe /s /t 0
+    } catch {
+        Write-Log "Shutdown command failed: $($_.Exception.Message)"
+    }
 }
 
 try {
@@ -214,11 +252,15 @@ try {
         $now = Get-Date
 
         if ($now -lt $startTime) {
-            Write-Log 'Schedule has not started yet'
-            exit 0
+            Write-Log 'Schedule has not started yet. Waiting until the start time.'
+
+            while ((Get-Date) -lt $startTime) {
+                if ($DryRun) { break }
+                Start-Sleep -Seconds 30
+            }
         }
 
-        if ($now -ge $endTime) {
+        if ((Get-Date) -ge $endTime) {
             Write-Log 'Schedule window has ended'
             exit 0
         }
@@ -227,7 +269,7 @@ try {
     Invoke-ProjectUpdate -Config $config -RepositoryUrl $RepositoryUrl
     Invoke-BrowserManager -Config $config
     Invoke-AutoLauncher -Config $config
-    Invoke-AutoShutdown -Config $config
+    Invoke-AutoShutdown -Config $config -EndTime $endTime -DryRun:$DryRun
 } catch {
     Write-Log "SchoolSync failed: $($_.Exception.Message)"
     throw
