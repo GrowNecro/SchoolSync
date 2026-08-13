@@ -126,7 +126,13 @@ class DashboardController extends Controller
             'app' => ['required', Rule::in(self::LAUNCHERS)],
         ]);
 
-        $this->queueCommand('open_app', ['app' => $validated['app']]);
+        $payload = ['app' => $validated['app']];
+        if ($validated['app'] === 'roblox') {
+            $setting = Setting::query()->with('project')->firstOrCreate([], Setting::defaults());
+            $payload['project'] = $setting->project?->filename;
+        }
+
+        $this->queueCommand('open_app', $payload);
 
         return redirect()->route('dashboard')->with('success', 'Perintah buka aplikasi sudah dikirim ke komputer SchoolSync yang aktif.');
     }

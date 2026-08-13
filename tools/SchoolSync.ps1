@@ -521,7 +521,7 @@ function Invoke-RemoteCommands {
                         Write-Log 'Skipped open_app in SYSTEM heartbeat process'
                         continue
                     }
-                    Start-SchoolSyncApplication -Launcher ([string]$command.payload.app)
+                    Start-SchoolSyncApplication -Launcher ([string]$command.payload.app) -ProjectName ([string]$command.payload.project)
                 } elseif ([string]$command.action -eq 'shutdown') {
                     if (Test-ShutdownExcluded -ComputerNames @($command.payload.excluded_computers)) {
                         Write-Log 'Ignored immediate shutdown because this computer is excluded'
@@ -640,16 +640,75 @@ function Invoke-AutoLauncher {
 
     foreach ($launcher in @($Config.launcher)) {
         if (-not $launcher) { continue }
-        Start-SchoolSyncApplication -Launcher ([string]$launcher)
+        Start-SchoolSyncApplication -Launcher ([string]$launcher) -ProjectName ([string]$Config.project)
     }
 }
 
+function Get-RobloxStudioExecutable {
+    $candidates = @()
+    if ($env:LOCALAPPDATA) {
+        $versionsRoot = Join-Path $env:LOCALAPPDATA 'Roblox\Versions'
+        if (Test-Path -LiteralPath $versionsRoot -PathType Container) {
+            $candidates = @(Get-ChildItem -LiteralPath $versionsRoot -Recurse -File -Filter 'RobloxStudioBeta.exe' -ErrorAction SilentlyContinue |
+                Sort-Object -Property LastWriteTimeUtc -Descending)
+        }
+    }
+
+    if ($candidates.Count -gt 0) {
+        return $candidates[0].FullName
+    }
+
+    $pathCommand = Get-Command 'RobloxStudioBeta.exe' -ErrorAction SilentlyContinue
+    if ($pathCommand) {
+        return $pathCommand.Source
+    }
+
+    throw 'Roblox Studio tidak ditemukan di LocalAppData\Roblox\Versions atau PATH.'
+}
+
+function Get-SafeProjectPath {
+    param([string]$ProjectName)
+
+    if ([string]::IsNullOrWhiteSpace($ProjectName)) { return $null }
+    if ([IO.Path]::GetFileName($ProjectName) -ne $ProjectName -or
+        $ProjectName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+        throw "Nama proyek Roblox tidak aman: $ProjectName"
+    }
+
+    $projectPath = [IO.Path]::GetFullPath((Join-Path $script:ProjectsDir $ProjectName))
+    $projectsRoot = [IO.Path]::GetFullPath($script:ProjectsDir)
+    if (-not $projectsRoot.EndsWith([IO.Path]::DirectorySeparatorChar)) {
+        $projectsRoot += [IO.Path]::DirectorySeparatorChar
+    }
+    if (-not $projectPath.StartsWith($projectsRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Path proyek Roblox berada di luar folder SchoolSync: $ProjectName"
+    }
+
+    if (Test-Path -LiteralPath $projectPath -PathType Leaf) {
+        return $projectPath
+    }
+
+    Write-Log "Roblox project was not found locally; opening Studio without a project: $ProjectName"
+    return $null
+}
+
 function Start-SchoolSyncApplication {
-    param([string]$Launcher)
+    param(
+        [string]$Launcher,
+        [string]$ProjectName
+    )
 
     $mapping = @{
         edge = { Start-Process -FilePath 'msedge.exe' }
-        roblox = { Start-Process -FilePath 'robloxstudio.exe' -ErrorAction SilentlyContinue }
+        roblox = {
+            $studioPath = Get-RobloxStudioExecutable
+            $projectPath = Get-SafeProjectPath -ProjectName $ProjectName
+            if ($projectPath) {
+                Start-Process -FilePath $studioPath -ArgumentList @("`"$projectPath`"")
+            } else {
+                Start-Process -FilePath $studioPath
+            }
+        }
         vscode = { Start-Process -FilePath 'code' -ErrorAction SilentlyContinue }
         scratch = { Start-Process -FilePath 'scratch.desktop' -ErrorAction SilentlyContinue }
         construct = { Start-Process -FilePath 'Construct.exe' -ErrorAction SilentlyContinue }

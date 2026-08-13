@@ -175,7 +175,7 @@ class SchoolSyncTest extends TestCase
     public function test_admin_can_queue_open_app_and_shutdown_with_exclusions(): void
     {
         $user = User::factory()->create();
-        Setting::query()->create([
+        $setting = Setting::query()->create([
             ...Setting::defaults(),
             'shutdown_excluded_computers' => ['LAB-GURU', 'SERVER-KELAS'],
         ]);
@@ -186,6 +186,21 @@ class SchoolSyncTest extends TestCase
         $this->getJson('/client/commands?after=0')->assertOk()->assertJsonFragment([
             'action' => 'open_app',
             'payload' => ['app' => 'vscode'],
+        ]);
+
+        $project = Project::query()->create([
+            'filename' => 'Pertemuan-01.rbxl',
+            'path' => 'projects/Pertemuan-01.rbxl',
+            'size' => 100,
+            'sha256' => hash('sha256', 'project'),
+            'extract' => false,
+        ]);
+        $setting->update(['project_id' => $project->id]);
+        $this->actingAs($user)->post(route('actions.open-app'), ['app' => 'roblox'])
+            ->assertSessionHasNoErrors()->assertRedirect(route('dashboard'));
+        $this->getJson('/client/commands?after=0')->assertOk()->assertJsonFragment([
+            'action' => 'open_app',
+            'payload' => ['app' => 'roblox', 'project' => 'Pertemuan-01.rbxl'],
         ]);
 
         $this->actingAs($user)->post(route('actions.shutdown'))
@@ -208,7 +223,7 @@ class SchoolSyncTest extends TestCase
         $this->postJson('/client/heartbeat', [
             'installation_id' => $installationId,
             'computer_name' => 'LAB-PC-01',
-            'version' => '1.7.0',
+            'version' => '1.7.1',
             'interactive' => true,
         ])->assertOk();
 
