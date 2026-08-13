@@ -12,7 +12,13 @@
             <div class="file-list">
                 @foreach ($computer->syncedFiles as $file)
                     @php($extension = strtoupper(pathinfo($file->relative_path, PATHINFO_EXTENSION) ?: 'FILE'))
-                    <article><div class="file-icon">{{ substr($extension, 0, 3) }}</div><div><strong>{{ $file->relative_path }}</strong><small>{{ number_format($file->size / 1024, 1) }} KB · {{ $file->synced_at->timezone('Asia/Jakarta')->format('d M Y, H:i') }} WIB</small></div><span class="active-badge">Tersinkron</span><a class="text-link" href="{{ route('client-files.download', $file) }}">Unduh</a></article>
+                    <article class="client-file-item"><div class="file-icon">{{ substr($extension, 0, 3) }}</div><div><strong>{{ $file->relative_path }}</strong><small>{{ number_format($file->size / 1024, 1) }} KB · {{ $file->synced_at->timezone('Asia/Jakarta')->format('d M Y, H:i') }} WIB · {{ $file->versions->count() }} versi</small></div><span class="active-badge">Terbaru</span><a class="text-link" href="{{ route('client-files.download', $file) }}">Unduh</a>
+                        <details class="version-history"><summary>Lihat riwayat versi</summary><div>
+                            @foreach ($file->versions as $version)
+                                <div class="version-row"><span><b>{{ $version->created_at->timezone('Asia/Jakarta')->format('d M Y, H:i:s') }}</b><small>{{ number_format($version->size / 1024, 1) }} KB · {{ substr($version->sha256, 0, 12) }}</small></span><a class="text-link" href="{{ route('client-file-versions.download', $version) }}">Unduh</a>@if ($version->sha256 !== $file->sha256)<form method="post" action="{{ route('client-file-versions.restore', $version) }}" onsubmit="return confirm('Pulihkan versi ini ke komputer {{ $computer->computer_name }}?')">@csrf<button class="restore-button" type="submit">Pulihkan</button></form>@else<span class="active-badge">Aktif</span>@endif</div>
+                            @endforeach
+                        </div></details>
+                    </article>
                 @endforeach
             </div>
         </section>

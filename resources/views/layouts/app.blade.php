@@ -15,8 +15,11 @@
         <nav>
             <a class="{{ request()->routeIs('dashboard') ? 'active' : '' }}" href="{{ route('dashboard') }}">Dashboard</a>
             <a class="{{ request()->routeIs('settings*') ? 'active' : '' }}" href="{{ route('settings') }}">Pengaturan kelas</a>
+            <a class="{{ request()->routeIs('schedules*') ? 'active' : '' }}" href="{{ route('schedules') }}">Multi-jadwal</a>
             <a class="{{ request()->routeIs('files') ? 'active' : '' }}" href="{{ route('files') }}">File &amp; proyek</a>
             <a class="{{ request()->routeIs('client-files*') ? 'active' : '' }}" href="{{ route('client-files') }}">File dari komputer</a>
+            <a class="{{ request()->routeIs('computers*') ? 'active' : '' }}" href="{{ route('computers') }}">Komputer &amp; grup</a>
+            <a class="{{ request()->routeIs('activity') ? 'active' : '' }}" href="{{ route('activity') }}">Riwayat perintah</a>
             <a class="{{ request()->routeIs('connection') ? 'active' : '' }}" href="{{ route('connection') }}">Koneksi komputer</a>
             <a class="{{ request()->routeIs('security') ? 'active' : '' }}" href="{{ route('security') }}">Keamanan</a>
         </nav>

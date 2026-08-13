@@ -3,7 +3,10 @@
 namespace Tests\Feature;
 
 use App\Models\ClientComputer;
+use App\Models\ClientFileVersion;
 use App\Models\ClientSyncedFile;
+use App\Models\ClassSchedule;
+use App\Models\CommandExecution;
 use App\Models\Project;
 use App\Models\Setting;
 use App\Models\User;
@@ -44,6 +47,7 @@ class SchoolSyncTest extends TestCase
 
     public function test_admin_can_save_configuration_and_api_returns_it(): void
     {
+        [$computer, $headers] = $this->authenticatedClient();
         $user = User::factory()->create(['username' => 'adminlab']);
         Setting::query()->create(Setting::defaults());
 
@@ -59,7 +63,7 @@ class SchoolSyncTest extends TestCase
             'shutdown_excluded_manual' => "SERVER-KELAS\nlab-guru",
         ])->assertSessionHasNoErrors()->assertRedirect();
 
-        $this->getJson('/client/config')->assertOk()->assertExactJson([
+        $this->withHeaders($headers)->getJson('/client/config?installation_id='.$computer->installation_id)->assertOk()->assertJson([
             'schedule' => ['day' => 'Thursday', 'start' => '08:00', 'end' => '10:00'],
             'project' => '',
             'browser' => ['https://classroom.google.com', 'https://example.com'],
@@ -68,8 +72,20 @@ class SchoolSyncTest extends TestCase
         ]);
     }
 
+    public function test_legacy_client_can_read_basic_config_until_it_self_updates(): void
+    {
+        Setting::query()->create(Setting::defaults());
+
+        $this->getJson('/client/config')
+            ->assertOk()
+            ->assertHeader('X-SchoolSync-Legacy', 'upgrade-required')
+            ->assertJsonStructure(['schedule', 'project', 'browser', 'launcher', 'shutdown'])
+            ->assertJsonMissingPath('schedules');
+    }
+
     public function test_project_upload_metadata_download_and_delete_work(): void
     {
+        [$computer, $headers] = $this->authenticatedClient();
         Storage::fake('local');
         $user = User::factory()->create();
         Setting::query()->create(Setting::defaults());
@@ -80,7 +96,7 @@ class SchoolSyncTest extends TestCase
 
         $project = Project::query()->firstOrFail();
         Storage::disk('local')->assertExists($project->path);
-        $this->get('/download?file=Pertemuan-01.rbxl')->assertOk()->assertDownload('Pertemuan-01.rbxl');
+        $this->withHeaders($headers)->get('/download?file=Pertemuan-01.rbxl&installation_id='.$computer->installation_id)->assertOk()->assertDownload('Pertemuan-01.rbxl');
         $this->get('/api/project.php?file=Pertemuan-01.rbxl')->assertNotFound();
 
         $this->actingAs($user)->delete(route('projects.destroy', $project))->assertRedirect();
@@ -90,6 +106,7 @@ class SchoolSyncTest extends TestCase
 
     public function test_any_file_can_be_uploaded_and_zip_is_listed_for_safe_extraction(): void
     {
+        [$computer, $headers] = $this->authenticatedClient();
         Storage::fake('local');
         $user = User::factory()->create();
         Setting::query()->create(Setting::defaults());
@@ -107,7 +124,7 @@ class SchoolSyncTest extends TestCase
         $this->assertNotEmpty($zip->sha256);
         $this->assertDatabaseHas('projects', ['filename' => 'poster-kelas.png', 'extract' => false]);
 
-        $this->getJson('/client/files')->assertOk()
+        $this->withHeaders($headers)->getJson('/client/files?installation_id='.$computer->installation_id)->assertOk()
             ->assertJsonFragment([
                 'name' => 'materi-kelas.zip',
                 'size' => 25 * 1024,
@@ -150,43 +167,69 @@ class SchoolSyncTest extends TestCase
         $user = User::factory()->create();
         Setting::query()->create(Setting::defaults());
 
-        foreach (['/', '/settings', '/files', '/connection', '/security'] as $page) {
+        foreach (['/', '/settings', '/files', '/client-files', '/computers', '/activity', '/connection', '/security'] as $page) {
             $this->actingAs($user)->get($page)->assertOk();
         }
 
         $this->actingAs($user)->post('/actions/open-url', [
             'url' => 'materi scratch kelas 8',
+            'target' => 'all',
         ])->assertSessionHasNoErrors()->assertRedirect(route('dashboard'));
 
         $command = \App\Models\RemoteCommand::query()->firstOrFail();
-        $this->getJson('/client/commands?after=0')->assertOk()->assertJsonFragment([
+        [$computer, $headers] = $this->authenticatedClient('LAB-COMMAND');
+        $this->withHeaders($headers)->getJson('/client/commands?after=0&installation_id='.$computer->installation_id)->assertOk()->assertJsonFragment([
             'id' => $command->id,
             'action' => 'open_edge',
             'payload' => ['url' => 'https://www.google.com/search?q=materi%20scratch%20kelas%208'],
         ]);
-        $this->getJson('/client/commands?after='.$command->id)->assertOk()->assertExactJson(['commands' => []]);
+        $this->withHeaders($headers)->getJson('/client/commands?after='.$command->id.'&installation_id='.$computer->installation_id)->assertOk()->assertExactJson(['commands' => [], 'cursor' => $command->id]);
 
         $this->actingAs($user)->post('/actions/open-url', [
             'url' => 'javascript:alert(1)',
+            'target' => 'all',
         ])->assertSessionHasErrors('url');
         $this->assertDatabaseCount('remote_commands', 1);
     }
 
     public function test_admin_can_queue_open_app_and_shutdown_with_exclusions(): void
     {
+        [$computer, $headers] = $this->authenticatedClient('LAB-A-01', 'LAB-A');
         $user = User::factory()->create();
         $setting = Setting::query()->create([
             ...Setting::defaults(),
             'shutdown_excluded_computers' => ['LAB-GURU', 'SERVER-KELAS'],
         ]);
 
-        $this->actingAs($user)->post(route('actions.open-app'), ['app' => 'vscode'])
+        $this->actingAs($user)->post(route('actions.open-app'), ['app' => 'vscode', 'target' => 'group:LAB-A'])
             ->assertSessionHasNoErrors()->assertRedirect(route('dashboard'));
         $this->assertDatabaseHas('remote_commands', ['action' => 'open_app']);
-        $this->getJson('/client/commands?after=0')->assertOk()->assertJsonFragment([
+        $this->withHeaders($headers)->getJson('/client/commands?after=0&installation_id='.$computer->installation_id)->assertOk()->assertJsonFragment([
             'action' => 'open_app',
             'payload' => ['app' => 'vscode'],
         ]);
+        $firstCommand = \App\Models\RemoteCommand::query()->where('action', 'open_app')->firstOrFail();
+        [$otherComputer, $otherHeaders] = $this->authenticatedClient('LAB-B-01', 'LAB-B');
+        $this->withHeaders($otherHeaders)->getJson('/client/commands?after=0&installation_id='.$otherComputer->installation_id)
+            ->assertOk()->assertExactJson(['commands' => [], 'cursor' => $firstCommand->id]);
+        $this->withHeaders($headers)->postJson('/client/commands/acknowledge', [
+            'installation_id' => $computer->installation_id,
+            'command_id' => $firstCommand->id,
+            'status' => 'success',
+            'message' => 'Visual Studio Code dibuka.',
+        ])->assertOk();
+        $this->assertDatabaseHas('command_executions', [
+            'remote_command_id' => $firstCommand->id,
+            'client_computer_id' => $computer->id,
+            'status' => 'success',
+        ]);
+        $this->withHeaders($headers)->postJson('/client/commands/acknowledge', [
+            'installation_id' => $computer->installation_id,
+            'command_id' => $firstCommand->id,
+            'status' => 'skipped',
+            'message' => 'Proses lain melewati perintah.',
+        ])->assertOk();
+        $this->assertSame('success', CommandExecution::query()->where('remote_command_id', $firstCommand->id)->where('client_computer_id', $computer->id)->value('status'));
 
         $project = Project::query()->create([
             'filename' => 'Pertemuan-01.rbxl',
@@ -196,38 +239,32 @@ class SchoolSyncTest extends TestCase
             'extract' => false,
         ]);
         $setting->update(['project_id' => $project->id]);
-        $this->actingAs($user)->post(route('actions.open-app'), ['app' => 'roblox'])
+        $this->actingAs($user)->post(route('actions.open-app'), ['app' => 'roblox', 'target' => 'computer:'.$computer->installation_id])
             ->assertSessionHasNoErrors()->assertRedirect(route('dashboard'));
-        $this->getJson('/client/commands?after=0')->assertOk()->assertJsonFragment([
+        $this->withHeaders($headers)->getJson('/client/commands?after=0&installation_id='.$computer->installation_id)->assertOk()->assertJsonFragment([
             'action' => 'open_app',
             'payload' => ['app' => 'roblox', 'project' => 'Pertemuan-01.rbxl'],
         ]);
 
-        $this->actingAs($user)->post(route('actions.shutdown'))
+        $this->actingAs($user)->post(route('actions.shutdown'), ['target' => 'all'])
             ->assertSessionHasNoErrors()->assertRedirect(route('dashboard'));
-        $this->getJson('/client/commands?after=0')->assertOk()->assertJsonFragment([
+        $this->withHeaders($headers)->getJson('/client/commands?after=0&installation_id='.$computer->installation_id)->assertOk()->assertJsonFragment([
             'action' => 'shutdown',
             'payload' => ['excluded_computers' => ['LAB-GURU', 'SERVER-KELAS']],
         ]);
 
-        $this->actingAs($user)->post(route('actions.open-app'), ['app' => 'cmd'])
+        $this->actingAs($user)->post(route('actions.open-app'), ['app' => 'cmd', 'target' => 'all'])
             ->assertSessionHasErrors('app');
     }
 
     public function test_client_files_are_grouped_privately_and_admin_can_download_them(): void
     {
         Storage::fake('local');
-        $installationId = (string) Str::uuid();
+        [$clientComputer, $headers] = $this->authenticatedClient('LAB-PC-01');
+        $installationId = $clientComputer->installation_id;
         $contents = 'updated roblox project';
 
-        $this->postJson('/client/heartbeat', [
-            'installation_id' => $installationId,
-            'computer_name' => 'LAB-PC-01',
-            'version' => '1.7.1',
-            'interactive' => true,
-        ])->assertOk();
-
-        $this->withHeader('X-SchoolSync-Client', '1')->post('/client/files/upload', [
+        $this->withHeaders($headers)->post('/client/files/upload', [
             'installation_id' => $installationId,
             'computer_name' => 'LAB-PC-01',
             'relative_path' => 'kelas-8/proyek.rbxl',
@@ -239,6 +276,19 @@ class SchoolSyncTest extends TestCase
         $this->assertSame('LAB-PC-01', $syncedFile->computer->computer_name);
         $this->assertStringContainsString('LAB-PC-01-'.$installationId, $syncedFile->storage_path);
         Storage::disk('local')->assertExists($syncedFile->storage_path);
+        $this->assertDatabaseCount('client_file_versions', 1);
+
+        $updatedContents = 'second project version';
+        $this->withHeaders($headers)->post('/client/files/upload', [
+            'installation_id' => $installationId,
+            'computer_name' => 'LAB-PC-01',
+            'relative_path' => 'kelas-8/proyek.rbxl',
+            'sha256' => hash('sha256', $updatedContents),
+            'file' => UploadedFile::fake()->createWithContent('proyek.rbxl', $updatedContents),
+        ])->assertOk();
+        $this->assertDatabaseCount('client_file_versions', 2);
+
+        $oldVersion = ClientFileVersion::query()->oldest()->firstOrFail();
 
         $this->get(route('client-files'))->assertRedirect(route('login'));
         $user = User::factory()->create();
@@ -246,14 +296,16 @@ class SchoolSyncTest extends TestCase
             ->assertSee('LAB-PC-01')->assertSee('kelas-8/proyek.rbxl');
         $this->actingAs($user)->get(route('client-files.download', $syncedFile))
             ->assertOk()->assertDownload('proyek.rbxl');
+        $this->actingAs($user)->post(route('client-file-versions.restore', $oldVersion))->assertRedirect(route('client-files'));
+        $this->assertDatabaseHas('remote_commands', ['action' => 'restore_file', 'target_type' => 'computer']);
 
-        $this->withHeader('X-SchoolSync-Client', '1')->post('/client/files/upload', [
+        $this->withHeaders($headers)->post('/client/files/upload', [
             'installation_id' => $installationId,
             'computer_name' => 'LAB-PC-01',
             'relative_path' => '../outside.txt',
             'sha256' => hash('sha256', 'x'),
             'file' => UploadedFile::fake()->createWithContent('outside.txt', 'x'),
-        ])->assertSessionHasErrors('relative_path');
+        ])->assertUnprocessable()->assertJsonValidationErrors('relative_path');
     }
 
     public function test_heartbeat_tracks_unique_active_computers_and_dashboard_status(): void
@@ -309,5 +361,85 @@ class SchoolSyncTest extends TestCase
             ->assertSee('Siap Edge')
             ->assertSee('LAB-PC-POWERED-ON')
             ->assertSee('Menyala');
+    }
+
+    public function test_new_client_pairing_requires_admin_approval_and_reports_inventory(): void
+    {
+        Setting::query()->create(Setting::defaults());
+        $installationId = (string) Str::uuid();
+        $response = $this->postJson('/client/heartbeat', [
+            'installation_id' => $installationId,
+            'computer_name' => 'LAB-PAIRING',
+            'version' => '2.0.0',
+            'interactive' => true,
+            'pairing_capable' => true,
+            'inventory' => [
+                'os' => 'Windows 11 Pro',
+                'ram_gb' => 16,
+                'disk_free_gb' => 120.5,
+                'roblox_studio' => true,
+            ],
+        ])->assertOk()->assertJson(['approved' => false, 'pairing_status' => 'pending']);
+        $token = $response->json('client_token');
+        $this->assertNotEmpty($token);
+
+        $computer = ClientComputer::query()->where('installation_id', $installationId)->firstOrFail();
+        $this->assertSame('Windows 11 Pro', $computer->inventory['os']);
+        $headers = ['Authorization' => 'Bearer '.$token];
+        $this->withHeaders($headers)->getJson('/client/config?installation_id='.$installationId)->assertForbidden();
+
+        $admin = User::factory()->create();
+        $this->actingAs($admin)->put(route('computers.update', $computer), [
+            'approved' => '1',
+            'group_name' => 'LAB-B',
+        ])->assertRedirect(route('computers'));
+        $this->withHeaders($headers)->getJson('/client/config?installation_id='.$installationId)->assertOk();
+    }
+
+    public function test_admin_can_create_multiple_targeted_schedules_with_exam_mode(): void
+    {
+        [$computer, $headers] = $this->authenticatedClient('LAB-JADWAL', 'LAB-C');
+        Setting::query()->create(Setting::defaults());
+        $admin = User::factory()->create();
+
+        $this->actingAs($admin)->post(route('schedules.store'), [
+            'name' => 'Ujian Kelas 9',
+            'schedule_day' => 'Monday',
+            'start_time' => '08:00',
+            'end_time' => '10:00',
+            'browser' => "ujian.example.com\nmateri ujian",
+            'launcher' => ['edge'],
+            'shutdown_warning' => 10,
+            'target' => 'group:LAB-C',
+            'exam_enabled' => '1',
+            'blocked_processes' => "discord.exe\nsteam",
+            'enabled' => '1',
+        ])->assertSessionHasNoErrors()->assertRedirect(route('schedules'));
+
+        $schedule = ClassSchedule::query()->firstOrFail();
+        $this->assertSame(['discord', 'steam'], $schedule->blocked_processes);
+        $this->withHeaders($headers)->getJson('/client/config?installation_id='.$computer->installation_id)
+            ->assertOk()
+            ->assertJsonFragment([
+                'name' => 'Ujian Kelas 9',
+                'exam' => ['enabled' => true, 'blocked_processes' => ['discord', 'steam']],
+            ]);
+    }
+
+    private function authenticatedClient(string $name = 'LAB-PC-TEST', ?string $group = null): array
+    {
+        $token = Str::random(64);
+        $computer = ClientComputer::query()->create([
+            'installation_id' => (string) Str::uuid(),
+            'computer_name' => $name,
+            'group_name' => $group,
+            'client_token_hash' => hash('sha256', $token),
+            'approved' => true,
+            'approved_at' => now(),
+            'version' => '1.8.0',
+            'last_seen_at' => now(),
+        ]);
+
+        return [$computer, ['Authorization' => 'Bearer '.$token]];
     }
 }

@@ -20,7 +20,9 @@ $script:CommandStatePath = Join-Path $script:RootDir $(if ($HeartbeatOnly) { 'co
 $script:LegacyCommandStatePath = Join-Path $script:RootDir 'commands.json'
 $script:ClientSyncStatePath = Join-Path $script:RootDir 'client-sync.json'
 $script:IdentityPath = Join-Path $script:RootDir 'identity.json'
+$script:TokenPath = Join-Path $script:RootDir 'client-token.txt'
 $script:LogPath = Join-Path $script:LogsDir 'schoolsync.log'
+$script:InventoryCache = $null
 
 function Write-Log {
     param([string]$Message)
@@ -65,13 +67,63 @@ function Get-ControlServerUrl {
     return ''
 }
 
+function Get-ClientToken {
+    if (Test-Path -LiteralPath $script:TokenPath -PathType Leaf) {
+        return (Get-Content -LiteralPath $script:TokenPath -Raw).Trim()
+    }
+    return ''
+}
+
+function Get-ClientHeaders {
+    $token = Get-ClientToken
+    if ($token) {
+        return @{ Authorization = "Bearer $token" }
+    }
+    return @{}
+}
+
+function Add-ClientIdentityToUri {
+    param([string]$Uri)
+
+    $separator = if ($Uri.Contains('?')) { '&' } else { '?' }
+    return $Uri + $separator + 'installation_id=' + [uri]::EscapeDataString($script:InstallationId)
+}
+
+function Get-ComputerInventory {
+    if ($script:InventoryCache) { return $script:InventoryCache }
+    $inventory = @{}
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        $inventory.os = [string]$os.Caption
+        $inventory.ram_gb = [Math]::Round(([double]$os.TotalVisibleMemorySize / 1MB), 1)
+    } catch {
+        $inventory.os = [Environment]::OSVersion.VersionString
+    }
+    try {
+        $drive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop
+        $inventory.disk_free_gb = [Math]::Round(([double]$drive.FreeSpace / 1GB), 1)
+    } catch {}
+    try {
+        $robloxPath = Get-RobloxStudioExecutable
+        $inventory.roblox_studio = [bool]$robloxPath
+        if ($robloxPath) {
+            $inventory.roblox_version = [string](Get-Item -LiteralPath $robloxPath).VersionInfo.ProductVersion
+        }
+    } catch {
+        $inventory.roblox_studio = $false
+    }
+    $script:InventoryCache = $inventory
+    return $script:InventoryCache
+}
+
 function Get-Config {
     param([string]$ServerUrl)
 
     if ($ServerUrl) {
         try {
             $remoteUri = "$($ServerUrl.TrimEnd('/'))/client/config"
-            $config = Invoke-RestMethod -Uri $remoteUri -Method Get
+            $remoteUri = Add-ClientIdentityToUri -Uri $remoteUri
+            $config = Invoke-RestMethod -Uri $remoteUri -Method Get -Headers (Get-ClientHeaders)
             Write-Log "Loaded control panel config from $remoteUri"
             return $config
         } catch {
@@ -175,9 +227,18 @@ function Invoke-Heartbeat {
             computer_name = $computerName
             version = $clientVersion
             interactive = (-not [bool]$HeartbeatOnly)
+            pairing_capable = $true
+            inventory = Get-ComputerInventory
         } | ConvertTo-Json
         $heartbeatUri = "$($ServerUrl.TrimEnd('/'))/client/heartbeat"
-        Invoke-RestMethod -Uri $heartbeatUri -Method Post -ContentType 'application/json' -Body $payload | Out-Null
+        $response = Invoke-RestMethod -Uri $heartbeatUri -Method Post -ContentType 'application/json' -Body $payload -Headers (Get-ClientHeaders)
+        if ($response.client_token) {
+            Set-Content -LiteralPath $script:TokenPath -Value ([string]$response.client_token) -Encoding ASCII
+            Write-Log 'Client pairing token saved'
+        }
+        if ([string]$response.pairing_status -eq 'pending') {
+            Write-Log 'Computer is waiting for administrator approval'
+        }
     } catch {
         Write-Log "Heartbeat failed: $($_.Exception.Message)"
     }
@@ -289,9 +350,9 @@ function Invoke-ResourceSync {
     }
 
     Ensure-Directory $script:DownloadsDir
-    $manifestUri = "$($ServerUrl.TrimEnd('/'))/client/files"
+    $manifestUri = Add-ClientIdentityToUri -Uri "$($ServerUrl.TrimEnd('/'))/client/files"
     try {
-        $manifest = Invoke-RestMethod -Uri $manifestUri -Method Get
+        $manifest = Invoke-RestMethod -Uri $manifestUri -Method Get -Headers (Get-ClientHeaders)
     } catch {
         Write-Log "File manifest unavailable: $($_.Exception.Message)"
         return
@@ -313,8 +374,8 @@ function Invoke-ResourceSync {
             if ($needsDownload) {
                 $tempPath = Join-Path $script:DownloadsDir ('.download-' + [guid]::NewGuid().ToString('N') + '.tmp')
                 $encodedName = [uri]::EscapeDataString($fileName)
-                $downloadUri = "$($ServerUrl.TrimEnd('/'))/download?file=$encodedName"
-                Invoke-WebRequest -Uri $downloadUri -OutFile $tempPath -UseBasicParsing
+                $downloadUri = Add-ClientIdentityToUri -Uri "$($ServerUrl.TrimEnd('/'))/download?file=$encodedName"
+                Invoke-WebRequest -Uri $downloadUri -OutFile $tempPath -UseBasicParsing -Headers (Get-ClientHeaders)
 
                 if ($expectedHash) {
                     $downloadedHash = (Get-FileHash -LiteralPath $tempPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -390,7 +451,10 @@ function Invoke-ClientFileSync {
             if ($syncState[$relativePath] -eq $hash) { continue }
 
             $httpClient = [Net.Http.HttpClient]::new()
-            $httpClient.DefaultRequestHeaders.Add('X-SchoolSync-Client', '1')
+            $token = Get-ClientToken
+            if ($token) {
+                $httpClient.DefaultRequestHeaders.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $token)
+            }
             $form = [Net.Http.MultipartFormDataContent]::new()
             $stream = $null
             $fileContent = $null
@@ -450,8 +514,8 @@ function Invoke-ProjectUpdate {
     if ($ServerUrl) {
         try {
             $projectName = [uri]::EscapeDataString([string]$Config.project)
-            $projectUri = "$($ServerUrl.TrimEnd('/'))/download?file=$projectName"
-            Invoke-WebRequest -Uri $projectUri -OutFile $targetPath -UseBasicParsing
+            $projectUri = Add-ClientIdentityToUri -Uri "$($ServerUrl.TrimEnd('/'))/download?file=$projectName"
+            Invoke-WebRequest -Uri $projectUri -OutFile $targetPath -UseBasicParsing -Headers (Get-ClientHeaders)
             Write-Log "Downloaded project $($Config.project) from control panel"
             return
         } catch {
@@ -463,6 +527,80 @@ function Invoke-ProjectUpdate {
         Write-Log "Project $($Config.project) already exists locally"
     } else {
         Write-Log "Project $($Config.project) not found locally"
+    }
+}
+
+function Send-CommandAcknowledgement {
+    param(
+        [string]$ServerUrl,
+        [int64]$CommandId,
+        [string]$Status,
+        [string]$Message
+    )
+
+    try {
+        $payload = @{
+            installation_id = $script:InstallationId
+            command_id = $CommandId
+            status = $Status
+            message = $Message
+        } | ConvertTo-Json
+        $ackUri = "$($ServerUrl.TrimEnd('/'))/client/commands/acknowledge"
+        Invoke-RestMethod -Uri $ackUri -Method Post -ContentType 'application/json' -Body $payload -Headers (Get-ClientHeaders) | Out-Null
+    } catch {
+        Write-Log "Command acknowledgement failed for ${CommandId}: $($_.Exception.Message)"
+    }
+}
+
+function Get-SafeClientProjectPath {
+    param([string]$RelativePath)
+
+    $normalized = $RelativePath.Replace('\', '/').Trim('/')
+    if ([string]::IsNullOrWhiteSpace($normalized) -or $normalized -match '^[A-Za-z]:' -or $normalized.StartsWith('/')) {
+        throw "Path pemulihan tidak valid: $RelativePath"
+    }
+    foreach ($segment in @($normalized.Split('/'))) {
+        if ([string]::IsNullOrWhiteSpace($segment) -or $segment -in @('.', '..')) {
+            throw "Path pemulihan tidak valid: $RelativePath"
+        }
+    }
+
+    $root = [IO.Path]::GetFullPath($script:ProjectsDir)
+    if (-not $root.EndsWith([IO.Path]::DirectorySeparatorChar)) {
+        $root += [IO.Path]::DirectorySeparatorChar
+    }
+    $target = [IO.Path]::GetFullPath((Join-Path $script:ProjectsDir $normalized))
+    if (-not $target.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Path pemulihan berada di luar folder proyek: $RelativePath"
+    }
+    return $target
+}
+
+function Restore-ClientFileVersion {
+    param(
+        [string]$ServerUrl,
+        [int64]$VersionId,
+        [string]$RelativePath,
+        [string]$ExpectedHash
+    )
+
+    $targetPath = Get-SafeClientProjectPath -RelativePath $RelativePath
+    $targetParent = Split-Path -Parent $targetPath
+    Ensure-Directory $targetParent
+    $tempPath = Join-Path $script:DownloadsDir ('.restore-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        $downloadUri = Add-ClientIdentityToUri -Uri "$($ServerUrl.TrimEnd('/'))/client/file-versions/$VersionId/download"
+        Invoke-WebRequest -Uri $downloadUri -OutFile $tempPath -UseBasicParsing -Headers (Get-ClientHeaders)
+        $actualHash = (Get-FileHash -LiteralPath $tempPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -ne $ExpectedHash.ToLowerInvariant()) {
+            throw "Checksum versi yang dipulihkan tidak sesuai untuk $RelativePath"
+        }
+        Move-Item -LiteralPath $tempPath -Destination $targetPath -Force
+        Write-Log "Restored client file version: $RelativePath"
+    } finally {
+        if (Test-Path -LiteralPath $tempPath) {
+            Remove-Item -LiteralPath $tempPath -Force
+        }
     }
 }
 
@@ -489,15 +627,19 @@ function Invoke-RemoteCommands {
     }
 
     try {
-        $commandUri = "$($ServerUrl.TrimEnd('/'))/client/commands?after=$lastId"
-        $response = Invoke-RestMethod -Uri $commandUri -Method Get
+        $commandUri = Add-ClientIdentityToUri -Uri "$($ServerUrl.TrimEnd('/'))/client/commands?after=$lastId"
+        $response = Invoke-RestMethod -Uri $commandUri -Method Get -Headers (Get-ClientHeaders)
         $newLastId = $lastId
 
         foreach ($command in @($response.commands)) {
             $commandId = [int64]$command.id
+            $executionStatus = 'success'
+            $executionMessage = 'Perintah selesai dijalankan.'
             try {
                 if ([string]$command.action -eq 'open_edge') {
                     if ($HeartbeatOnly) {
+                        $executionStatus = 'skipped'
+                        $executionMessage = 'Menunggu proses pengguna untuk membuka Edge.'
                         Write-Log 'Skipped open_edge in SYSTEM heartbeat process'
                         continue
                     }
@@ -518,27 +660,53 @@ function Invoke-RemoteCommands {
                     }
                 } elseif ([string]$command.action -eq 'open_app') {
                     if ($HeartbeatOnly) {
+                        $executionStatus = 'skipped'
+                        $executionMessage = 'Menunggu proses pengguna untuk membuka aplikasi.'
                         Write-Log 'Skipped open_app in SYSTEM heartbeat process'
                         continue
                     }
                     Start-SchoolSyncApplication -Launcher ([string]$command.payload.app) -ProjectName ([string]$command.payload.project)
                 } elseif ([string]$command.action -eq 'shutdown') {
-                    if (Test-ShutdownExcluded -ComputerNames @($command.payload.excluded_computers)) {
+                    if (-not $HeartbeatOnly) {
+                        $executionStatus = 'skipped'
+                        $executionMessage = 'Shutdown ditangani oleh proses SYSTEM.'
+                        Write-Log 'Skipped shutdown in interactive process'
+                        continue
+                    } elseif (Test-ShutdownExcluded -ComputerNames @($command.payload.excluded_computers)) {
+                        $executionStatus = 'skipped'
+                        $executionMessage = 'Komputer termasuk daftar pengecualian shutdown.'
                         Write-Log 'Ignored immediate shutdown because this computer is excluded'
                     } elseif ($script:DryRunMode) {
                         Write-Log 'Dry run: would shut down computer immediately'
                     } else {
                         Write-Log 'Immediate shutdown command received'
-                        & shutdown.exe /s /t 0
+                        & shutdown.exe /s /t 5
                     }
+                } elseif ([string]$command.action -eq 'restore_file') {
+                    if (-not $HeartbeatOnly) {
+                        $executionStatus = 'skipped'
+                        $executionMessage = 'Pemulihan file ditangani oleh proses SYSTEM.'
+                        Write-Log 'Skipped restore_file in interactive process'
+                        continue
+                    }
+                    Restore-ClientFileVersion -ServerUrl $ServerUrl -VersionId ([int64]$command.payload.version_id) -RelativePath ([string]$command.payload.relative_path) -ExpectedHash ([string]$command.payload.sha256)
                 } else {
+                    $executionStatus = 'skipped'
+                    $executionMessage = "Perintah tidak didukung: $($command.action)"
                     Write-Log "Ignored unsupported remote command: $($command.action)"
                 }
             } catch {
+                $executionStatus = 'failed'
+                $executionMessage = $_.Exception.Message
                 Write-Log "Remote command $commandId failed: $($_.Exception.Message)"
             } finally {
+                Send-CommandAcknowledgement -ServerUrl $ServerUrl -CommandId $commandId -Status $executionStatus -Message $executionMessage
                 if ($commandId -gt $newLastId) { $newLastId = $commandId }
             }
+        }
+
+        if ($response.cursor -and [int64]$response.cursor -gt $newLastId) {
+            $newLastId = [int64]$response.cursor
         }
 
         if ($newLastId -ne $lastId) {
@@ -740,6 +908,32 @@ function Test-ShutdownExcluded {
     return $false
 }
 
+function Invoke-ExamMode {
+    param(
+        [object]$Config,
+        [switch]$DryRun
+    )
+
+    if (-not $Config.exam -or -not [bool]$Config.exam.enabled) { return }
+    $protected = @('schoolsync', 'powershell', 'pwsh', 'winlogon', 'lsass', 'csrss', 'services', 'svchost', 'system', 'explorer')
+    foreach ($processName in @($Config.exam.blocked_processes)) {
+        $normalized = ([IO.Path]::GetFileNameWithoutExtension([string]$processName)).ToLowerInvariant()
+        if (-not $normalized -or $normalized -in $protected) { continue }
+        foreach ($process in @(Get-Process -Name $normalized -ErrorAction SilentlyContinue)) {
+            if ($DryRun) {
+                Write-Log "Dry run: exam mode would close process $normalized"
+            } else {
+                try {
+                    Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                    Write-Log "Exam mode closed process $normalized"
+                } catch {
+                    Write-Log "Exam mode could not close ${normalized}: $($_.Exception.Message)"
+                }
+            }
+        }
+    }
+}
+
 function Invoke-AutoShutdown {
     param(
         [object]$Config,
@@ -748,21 +942,16 @@ function Invoke-AutoShutdown {
         [switch]$DryRun
     )
 
-    if (-not ($Config.shutdown.enabled)) {
-        Write-Log 'Auto-shutdown disabled'
-        return
-    }
-
-    if (Test-ShutdownExcluded -ComputerNames @($Config.shutdown.excluded_computers)) {
-        Write-Log 'Auto-shutdown skipped because this computer is excluded'
-        return
-    }
-
+    $shutdownAllowed = [bool]$Config.shutdown.enabled -and -not (Test-ShutdownExcluded -ComputerNames @($Config.shutdown.excluded_computers))
     $warningMinutes = if ($Config.shutdown.warning) { [int]$Config.shutdown.warning } else { 10 }
-    Write-Log "Auto-shutdown enabled. Warning period: $warningMinutes minute(s)."
+    if ($shutdownAllowed) {
+        Write-Log "Auto-shutdown enabled. Warning period: $warningMinutes minute(s)."
+    } else {
+        Write-Log 'Session monitoring active without shutdown for this computer'
+    }
 
     if ($EndTime -eq [datetime]::MinValue) {
-        Write-Log 'No schedule end time provided; skipping shutdown workflow'
+        Write-Log 'No schedule end time provided; skipping session monitor'
         return
     }
 
@@ -777,6 +966,7 @@ function Invoke-AutoShutdown {
     $updateCountdown = 6
 
     while ((Get-Date) -lt $EndTime) {
+        Invoke-ExamMode -Config $Config -DryRun:$DryRun
         Invoke-RemoteCommands -ServerUrl $ServerUrl
         $updateCountdown--
         if ($updateCountdown -le 0) {
@@ -800,7 +990,7 @@ function Invoke-AutoShutdown {
         }
         $remaining = [Math]::Ceiling(($EndTime - (Get-Date)).TotalMinutes)
 
-        if ($remaining -le $warningMinutes -and -not $warningTriggered -and $remaining -gt 0) {
+        if ($shutdownAllowed -and $remaining -le $warningMinutes -and -not $warningTriggered -and $remaining -gt 0) {
             try {
                 Add-Type -AssemblyName System.Windows.Forms | Out-Null
                 [System.Windows.Forms.MessageBox]::Show("Praktikum akan berakhir dalam $remaining menit.", 'SchoolSync', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
@@ -814,11 +1004,13 @@ function Invoke-AutoShutdown {
         Start-Sleep -Seconds 10
     }
 
-    try {
-        Write-Log 'Shutting down computer'
-        & shutdown.exe /s /t 0
-    } catch {
-        Write-Log "Shutdown command failed: $($_.Exception.Message)"
+    if ($shutdownAllowed) {
+        try {
+            Write-Log 'Shutting down computer'
+            & shutdown.exe /s /t 0
+        } catch {
+            Write-Log "Shutdown command failed: $($_.Exception.Message)"
+        }
     }
 }
 
@@ -852,7 +1044,21 @@ try {
         return
     }
 
-    $config = Get-Config -ServerUrl $ServerUrl
+    $config = $null
+    while (-not $config) {
+        try {
+            $config = Get-Config -ServerUrl $ServerUrl
+        } catch {
+            Write-Log "Waiting for pairing approval or configuration: $($_.Exception.Message)"
+            if (Invoke-SelfUpdate -ServerUrl $ServerUrl -QuietWhenCurrent) {
+                $script:RestartRequested = $true
+                return
+            }
+            Invoke-Heartbeat -ServerUrl $ServerUrl
+            if ($DryRun) { throw }
+            Start-Sleep -Seconds 15
+        }
+    }
     if (Invoke-SelfUpdate -ServerUrl $ServerUrl) {
         $script:RestartRequested = $true
         return
@@ -861,63 +1067,63 @@ try {
     Invoke-ClientFileSync -ServerUrl $ServerUrl
     Invoke-Heartbeat -ServerUrl $ServerUrl
 
-    $schedule = $config.schedule
-    $sessionActive = $false
-    if ($schedule) {
-        $today = (Get-Date).DayOfWeek.ToString()
-        if ($today -ne $schedule.day) {
-            Write-Log "Schedule day mismatch. Expected $($schedule.day), got $today"
-        } else {
-            $startTime = Get-DateTimeFromTimeString -TimeText $schedule.start
-            $endTime = Get-DateTimeFromTimeString -TimeText $schedule.end
-            $now = Get-Date
+    $hasMultiSchedule = $config.PSObject.Properties.Name -contains 'schedules'
+    $sessionConfigs = if ($hasMultiSchedule) { @($config.schedules) } else { @($config) }
+    $sessionConfigs = @($sessionConfigs | Sort-Object { [string]$_.schedule.start })
+    $today = (Get-Date).DayOfWeek.ToString()
 
-            if ($now -lt $startTime) {
-                Write-Log 'Schedule has not started yet. Listening for commands while waiting.'
-                $fileSyncCountdown = 6
-                $heartbeatCountdown = 3
-                $updateCountdown = 6
-                while ((Get-Date) -lt $startTime) {
-                    Invoke-RemoteCommands -ServerUrl $ServerUrl
-                    $updateCountdown--
-                    if ($updateCountdown -le 0) {
-                        if (Invoke-SelfUpdate -ServerUrl $ServerUrl -QuietWhenCurrent) {
-                            $script:RestartRequested = $true
-                            return
-                        }
-                        $updateCountdown = 6
+    foreach ($sessionConfig in $sessionConfigs) {
+        $schedule = $sessionConfig.schedule
+        if (-not $schedule -or $today -ne [string]$schedule.day) { continue }
+
+        $startTime = Get-DateTimeFromTimeString -TimeText ([string]$schedule.start)
+        $endTime = Get-DateTimeFromTimeString -TimeText ([string]$schedule.end)
+        if ((Get-Date) -ge $endTime) {
+            Write-Log "Schedule already ended: $($sessionConfig.name)"
+            continue
+        }
+
+        if ((Get-Date) -lt $startTime) {
+            Write-Log "Waiting for schedule: $($sessionConfig.name)"
+            $fileSyncCountdown = 6
+            $heartbeatCountdown = 3
+            $updateCountdown = 6
+            while ((Get-Date) -lt $startTime) {
+                Invoke-RemoteCommands -ServerUrl $ServerUrl
+                $updateCountdown--
+                if ($updateCountdown -le 0) {
+                    if (Invoke-SelfUpdate -ServerUrl $ServerUrl -QuietWhenCurrent) {
+                        $script:RestartRequested = $true
+                        return
                     }
-                    $heartbeatCountdown--
-                    if ($heartbeatCountdown -le 0) {
-                        Invoke-Heartbeat -ServerUrl $ServerUrl
-                        $heartbeatCountdown = 3
-                    }
-                    $fileSyncCountdown--
-                    if ($fileSyncCountdown -le 0) {
-                        Invoke-ResourceSync -ServerUrl $ServerUrl
-                        Invoke-ClientFileSync -ServerUrl $ServerUrl
-                        Invoke-Heartbeat -ServerUrl $ServerUrl
-                        $fileSyncCountdown = 6
-                    }
-                    if ($DryRun) { break }
-                    Start-Sleep -Seconds 10
+                    $updateCountdown = 6
                 }
-            }
-
-            if ((Get-Date) -ge $startTime -and (Get-Date) -lt $endTime) {
-                $sessionActive = $true
-            } elseif ((Get-Date) -ge $endTime) {
-                Write-Log 'Schedule window has ended; command listener remains active'
+                $heartbeatCountdown--
+                if ($heartbeatCountdown -le 0) {
+                    Invoke-Heartbeat -ServerUrl $ServerUrl
+                    $heartbeatCountdown = 3
+                }
+                $fileSyncCountdown--
+                if ($fileSyncCountdown -le 0) {
+                    Invoke-ResourceSync -ServerUrl $ServerUrl
+                    Invoke-ClientFileSync -ServerUrl $ServerUrl
+                    Invoke-Heartbeat -ServerUrl $ServerUrl
+                    $fileSyncCountdown = 6
+                }
+                if ($DryRun) { break }
+                Start-Sleep -Seconds 10
             }
         }
-    }
 
-    if ($sessionActive) {
-        Invoke-ProjectUpdate -Config $config -ServerUrl $ServerUrl
-        Invoke-BrowserManager -Config $config
-        Invoke-AutoLauncher -Config $config
-        Invoke-AutoShutdown -Config $config -EndTime $endTime -ServerUrl $ServerUrl -DryRun:$DryRun
-        if ($script:RestartRequested) { return }
+        if ((Get-Date) -ge $startTime -and (Get-Date) -lt $endTime) {
+            Write-Log "Starting schedule: $($sessionConfig.name)"
+            Invoke-ProjectUpdate -Config $sessionConfig -ServerUrl $ServerUrl
+            Invoke-BrowserManager -Config $sessionConfig
+            Invoke-AutoLauncher -Config $sessionConfig
+            Invoke-ExamMode -Config $sessionConfig -DryRun:$DryRun
+            Invoke-AutoShutdown -Config $sessionConfig -EndTime $endTime -ServerUrl $ServerUrl -DryRun:$DryRun
+            if ($script:RestartRequested) { return }
+        }
     }
 
     Start-ClientListener -ServerUrl $ServerUrl -DryRun:$DryRun

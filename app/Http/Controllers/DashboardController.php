@@ -3,7 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Models\ClientComputer;
+use App\Models\ClientFileVersion;
 use App\Models\ClientSyncedFile;
+use App\Models\CommandExecution;
+use App\Models\ClassSchedule;
 use App\Models\Project;
 use App\Models\RemoteCommand;
 use App\Models\Setting;
@@ -34,6 +37,9 @@ class DashboardController extends Controller
             'setting' => $setting,
             'projects' => $projects,
             'days' => $this->dayLabels(),
+            'scheduleCount' => ClassSchedule::query()->where('enabled', true)->count(),
+            'commandTargets' => $this->commandTargetOptions(),
+            'recentCommands' => RemoteCommand::query()->with('executions')->latest()->limit(8)->get(),
             ...$this->computerStatusData(),
         ]);
     }
@@ -63,6 +69,42 @@ class DashboardController extends Controller
         ]);
     }
 
+    public function schedulesPage(): View
+    {
+        return view('schedules', [
+            'schedules' => ClassSchedule::query()->with('project')->orderBy('schedule_day')->orderBy('start_time')->get(),
+            'projects' => Project::query()->orderBy('filename')->get(),
+            'days' => $this->dayLabels(),
+            'launchers' => [
+                'edge' => 'Microsoft Edge', 'roblox' => 'Roblox Studio', 'vscode' => 'Visual Studio Code',
+                'scratch' => 'Scratch Desktop', 'construct' => 'Construct 3', 'python' => 'Python IDLE',
+            ],
+            'commandTargets' => $this->commandTargetOptions(),
+        ]);
+    }
+
+    public function storeSchedule(Request $request): RedirectResponse
+    {
+        ClassSchedule::query()->create($this->validatedScheduleData($request));
+
+        return redirect()->route('schedules')->with('success', 'Jadwal baru berhasil ditambahkan.');
+    }
+
+    public function updateSchedule(Request $request, ClassSchedule $schedule): RedirectResponse
+    {
+        $schedule->update($this->validatedScheduleData($request));
+
+        return redirect()->route('schedules')->with('success', "Jadwal {$schedule->name} berhasil diperbarui.");
+    }
+
+    public function deleteSchedule(ClassSchedule $schedule): RedirectResponse
+    {
+        $name = $schedule->name;
+        $schedule->delete();
+
+        return redirect()->route('schedules')->with('success', "Jadwal {$name} berhasil dihapus.");
+    }
+
     public function filesPage(): View
     {
         return view('files', [
@@ -75,7 +117,7 @@ class DashboardController extends Controller
     {
         $computers = ClientComputer::query()
             ->whereHas('syncedFiles')
-            ->with(['syncedFiles' => fn ($query) => $query->latest('synced_at')])
+            ->with(['syncedFiles' => fn ($query) => $query->with('versions')->latest('synced_at')])
             ->orderBy('computer_name')
             ->get();
 
@@ -93,9 +135,76 @@ class DashboardController extends Controller
         );
     }
 
+    public function downloadClientFileVersion(ClientFileVersion $clientFileVersion): \Symfony\Component\HttpFoundation\BinaryFileResponse
+    {
+        $clientFileVersion->loadMissing('syncedFile');
+        abort_unless(Storage::disk('local')->exists($clientFileVersion->storage_path), 404);
+
+        return response()->download(
+            Storage::disk('local')->path($clientFileVersion->storage_path),
+            basename($clientFileVersion->syncedFile->relative_path),
+            ['X-Content-Type-Options' => 'nosniff']
+        );
+    }
+
+    public function restoreClientFileVersion(ClientFileVersion $clientFileVersion): RedirectResponse
+    {
+        $clientFileVersion->loadMissing('syncedFile.computer');
+        $syncedFile = $clientFileVersion->syncedFile;
+        abort_unless($syncedFile && $syncedFile->computer, 404);
+        abort_unless(Storage::disk('local')->exists($clientFileVersion->storage_path), 404);
+
+        $syncedFile->update([
+            'storage_path' => $clientFileVersion->storage_path,
+            'size' => $clientFileVersion->size,
+            'sha256' => $clientFileVersion->sha256,
+            'synced_at' => now(),
+        ]);
+        $this->queueCommand('restore_file', [
+            'version_id' => $clientFileVersion->id,
+            'relative_path' => $syncedFile->relative_path,
+            'sha256' => $clientFileVersion->sha256,
+        ], 'computer:'.$syncedFile->computer->installation_id, 10080);
+
+        return redirect()->route('client-files')->with('success', "Versi {$syncedFile->relative_path} dijadwalkan untuk dipulihkan ke {$syncedFile->computer->computer_name}.");
+    }
+
     public function connectionPage(): View
     {
         return view('connection');
+    }
+
+    public function computersPage(): View
+    {
+        return view('computers', [
+            'computers' => ClientComputer::query()->latest('last_seen_at')->get(),
+        ]);
+    }
+
+    public function updateComputer(Request $request, ClientComputer $computer): RedirectResponse
+    {
+        $validated = $request->validate([
+            'group_name' => ['nullable', 'string', 'max:100', 'not_regex:/[\x00-\x1F\x7F]/'],
+        ]);
+        $approved = $request->boolean('approved');
+        $updates = [
+            'group_name' => trim((string) ($validated['group_name'] ?? '')) ?: null,
+            'approved' => $approved,
+            'approved_at' => $approved ? ($computer->approved_at ?? now()) : null,
+        ];
+        if ($request->boolean('reset_pairing')) {
+            $updates['client_token_hash'] = null;
+        }
+        $computer->update($updates);
+
+        return redirect()->route('computers')->with('success', "Komputer {$computer->computer_name} berhasil diperbarui.");
+    }
+
+    public function commandActivityPage(): View
+    {
+        return view('command-activity', [
+            'commands' => RemoteCommand::query()->with(['executions.computer'])->latest()->limit(100)->get(),
+        ]);
     }
 
     public function securityPage(): View
@@ -107,15 +216,11 @@ class DashboardController extends Controller
     {
         $validated = $request->validate([
             'url' => ['required', 'string', 'max:2000', 'not_regex:/[\x00-\x1F\x7F\"]/'],
+            'target' => ['required', 'string', 'max:200'],
         ]);
         $url = $this->normalizeHttpUrl($validated['url'], 'url');
 
-        RemoteCommand::query()->where('expires_at', '<', now()->subDay())->delete();
-        RemoteCommand::query()->create([
-            'action' => 'open_edge',
-            'payload' => ['url' => $url],
-            'expires_at' => now()->addMinutes(10),
-        ]);
+        $this->queueCommand('open_edge', ['url' => $url], $validated['target']);
 
         return redirect()->route('dashboard')->with('success', 'Perintah buka Edge sudah dikirim ke komputer SchoolSync yang aktif.');
     }
@@ -124,6 +229,7 @@ class DashboardController extends Controller
     {
         $validated = $request->validate([
             'app' => ['required', Rule::in(self::LAUNCHERS)],
+            'target' => ['required', 'string', 'max:200'],
         ]);
 
         $payload = ['app' => $validated['app']];
@@ -132,16 +238,17 @@ class DashboardController extends Controller
             $payload['project'] = $setting->project?->filename;
         }
 
-        $this->queueCommand('open_app', $payload);
+        $this->queueCommand('open_app', $payload, $validated['target']);
 
         return redirect()->route('dashboard')->with('success', 'Perintah buka aplikasi sudah dikirim ke komputer SchoolSync yang aktif.');
     }
 
-    public function shutdownNow(): RedirectResponse
+    public function shutdownNow(Request $request): RedirectResponse
     {
+        $validated = $request->validate(['target' => ['required', 'string', 'max:200']]);
         $setting = Setting::query()->firstOrCreate([], Setting::defaults());
         $excluded = array_values($setting->shutdown_excluded_computers ?? []);
-        $this->queueCommand('shutdown', ['excluded_computers' => $excluded]);
+        $this->queueCommand('shutdown', ['excluded_computers' => $excluded], $validated['target']);
 
         $message = 'Perintah shutdown sudah dikirim.';
         if ($excluded !== []) {
@@ -194,6 +301,25 @@ class DashboardController extends Controller
             'shutdown_warning' => $validated['shutdown_warning'],
             'shutdown_excluded_computers' => $excludedComputers,
         ]);
+
+        ClassSchedule::query()->updateOrCreate(
+            ['name' => 'Jadwal utama'],
+            [
+                'schedule_day' => $validated['schedule_day'],
+                'start_time' => $validated['start_time'],
+                'end_time' => $validated['end_time'],
+                'project_id' => $validated['project_id'] ?? null,
+                'browser' => $browser,
+                'launcher' => array_values($validated['launcher'] ?? []),
+                'shutdown_enabled' => $request->boolean('shutdown_enabled'),
+                'shutdown_warning' => $validated['shutdown_warning'],
+                'target_type' => 'all',
+                'target_value' => null,
+                'exam_enabled' => false,
+                'blocked_processes' => [],
+                'enabled' => true,
+            ]
+        );
 
         return redirect()->route('settings')->with('success', 'Konfigurasi berhasil disimpan dan siap dibaca komputer lab.');
     }
@@ -285,14 +411,127 @@ class DashboardController extends Controller
         return $url;
     }
 
-    private function queueCommand(string $action, array $payload): void
+    private function queueCommand(string $action, array $payload, string $target, int $expiresInMinutes = 10): RemoteCommand
     {
         RemoteCommand::query()->where('expires_at', '<', now()->subDay())->delete();
-        RemoteCommand::query()->create([
-            'action' => $action,
-            'payload' => $payload,
-            'expires_at' => now()->addMinutes(10),
+        [$targetType, $targetValue] = $this->parseCommandTarget($target);
+
+        return DB::transaction(function () use ($action, $payload, $targetType, $targetValue, $expiresInMinutes): RemoteCommand {
+            $command = RemoteCommand::query()->create([
+                'action' => $action,
+                'payload' => $payload,
+                'target_type' => $targetType,
+                'target_value' => $targetValue,
+                'expires_at' => now()->addMinutes($expiresInMinutes),
+            ]);
+
+            $this->targetComputerQuery($targetType, $targetValue)->pluck('id')->each(
+                fn (int $computerId) => CommandExecution::query()->create([
+                    'remote_command_id' => $command->id,
+                    'client_computer_id' => $computerId,
+                ])
+            );
+
+            return $command;
+        });
+    }
+
+    private function commandTargetOptions(): array
+    {
+        $options = [['value' => 'all', 'label' => 'Semua komputer disetujui']];
+        ClientComputer::query()->where('approved', true)->whereNotNull('group_name')->distinct()->orderBy('group_name')->pluck('group_name')->each(
+            function (string $group) use (&$options): void {
+                $options[] = ['value' => 'group:'.$group, 'label' => 'Grup · '.$group];
+            }
+        );
+        ClientComputer::query()->where('approved', true)->orderBy('computer_name')->get()->each(
+            function (ClientComputer $computer) use (&$options): void {
+                $options[] = ['value' => 'computer:'.$computer->installation_id, 'label' => 'Komputer · '.$computer->computer_name];
+            }
+        );
+
+        return $options;
+    }
+
+    private function validatedScheduleData(Request $request): array
+    {
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'max:100', 'not_regex:/[\x00-\x1F\x7F]/'],
+            'schedule_day' => ['required', Rule::in(self::DAYS)],
+            'start_time' => ['required', 'date_format:H:i'],
+            'end_time' => ['required', 'date_format:H:i', 'after:start_time'],
+            'project_id' => ['nullable', 'integer', 'exists:projects,id'],
+            'browser' => ['nullable', 'string', 'max:5000'],
+            'launcher' => ['nullable', 'array'],
+            'launcher.*' => [Rule::in(self::LAUNCHERS)],
+            'shutdown_warning' => ['required', 'integer', 'min:1', 'max:120'],
+            'target' => ['required', 'string', 'max:200'],
+            'blocked_processes' => ['nullable', 'string', 'max:5000'],
         ]);
+
+        $browser = array_values(array_unique(array_map(
+            fn (string $url): string => $this->normalizeHttpUrl($url, 'browser'),
+            array_values(array_filter(array_map('trim', preg_split('/\R/u', (string) ($validated['browser'] ?? '')) ?: [])))
+        )));
+        $protectedProcesses = ['schoolsync', 'powershell', 'pwsh', 'winlogon', 'lsass', 'csrss', 'services', 'svchost', 'system', 'explorer'];
+        $blocked = [];
+        foreach (preg_split('/\R/u', (string) ($validated['blocked_processes'] ?? '')) ?: [] as $process) {
+            $process = strtolower(pathinfo(trim($process), PATHINFO_FILENAME));
+            if ($process === '') {
+                continue;
+            }
+            if (! preg_match('/^[a-z0-9._-]{1,100}$/', $process) || in_array($process, $protectedProcesses, true)) {
+                throw ValidationException::withMessages(['blocked_processes' => "Proses tidak aman atau tidak valid: {$process}"]);
+            }
+            $blocked[$process] = $process;
+        }
+        [$targetType, $targetValue] = $this->parseCommandTarget($validated['target']);
+
+        return [
+            'name' => trim($validated['name']),
+            'schedule_day' => $validated['schedule_day'],
+            'start_time' => $validated['start_time'],
+            'end_time' => $validated['end_time'],
+            'project_id' => $validated['project_id'] ?? null,
+            'browser' => $browser,
+            'launcher' => array_values($validated['launcher'] ?? []),
+            'shutdown_enabled' => $request->boolean('shutdown_enabled'),
+            'shutdown_warning' => $validated['shutdown_warning'],
+            'target_type' => $targetType,
+            'target_value' => $targetValue,
+            'exam_enabled' => $request->boolean('exam_enabled'),
+            'blocked_processes' => array_values($blocked),
+            'enabled' => $request->boolean('enabled'),
+        ];
+    }
+
+    private function parseCommandTarget(string $target): array
+    {
+        if ($target === 'all') {
+            return ['all', null];
+        }
+
+        [$type, $value] = array_pad(explode(':', $target, 2), 2, '');
+        if ($type === 'group' && ClientComputer::query()->where('approved', true)->where('group_name', $value)->exists()) {
+            return ['group', [$value]];
+        }
+        if ($type === 'computer' && ClientComputer::query()->where('approved', true)->where('installation_id', $value)->exists()) {
+            return ['computer', [$value]];
+        }
+
+        throw ValidationException::withMessages(['target' => 'Target komputer tidak valid atau belum disetujui.']);
+    }
+
+    private function targetComputerQuery(string $targetType, ?array $targetValue)
+    {
+        $query = ClientComputer::query()->where('approved', true);
+        if ($targetType === 'group') {
+            $query->whereIn('group_name', $targetValue ?? []);
+        } elseif ($targetType === 'computer') {
+            $query->whereIn('installation_id', $targetValue ?? []);
+        }
+
+        return $query;
     }
 
     private function uniqueComputerNames(array $names): array

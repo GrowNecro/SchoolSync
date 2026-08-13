@@ -4,7 +4,7 @@
 @section('section', 'PENGATURAN KELAS')
 
 @section('content')
-    <section class="page-heading"><span class="eyebrow">Konfigurasi</span><h1>Pengaturan kelas</h1><p>Jadwal, proyek aktif, website, aplikasi, dan shutdown otomatis.</p></section>
+    <section class="page-heading"><span class="eyebrow">Konfigurasi dasar</span><h1>Pengaturan kelas</h1><p>Form ini mengatur Jadwal utama dan pengecualian shutdown global. Gunakan <a class="text-link" href="{{ route('schedules') }}">Multi-jadwal</a> untuk sesi tambahan, target grup, dan mode ujian.</p></section>
     <form method="post" action="{{ route('settings.update') }}" class="config-form">
         @csrf @method('PUT')
         <section class="panel">

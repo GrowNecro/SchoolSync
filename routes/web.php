@@ -15,10 +15,19 @@ Route::get('/installer', [ClientApiController::class, 'installer'])->middleware(
 Route::middleware('auth')->group(function (): void {
     Route::get('/', [DashboardController::class, 'index'])->name('dashboard');
     Route::get('/settings', [DashboardController::class, 'settingsPage'])->name('settings');
+    Route::get('/schedules', [DashboardController::class, 'schedulesPage'])->name('schedules');
+    Route::post('/schedules', [DashboardController::class, 'storeSchedule'])->name('schedules.store');
+    Route::put('/schedules/{schedule}', [DashboardController::class, 'updateSchedule'])->name('schedules.update');
+    Route::delete('/schedules/{schedule}', [DashboardController::class, 'deleteSchedule'])->name('schedules.destroy');
     Route::get('/files', [DashboardController::class, 'filesPage'])->name('files');
     Route::get('/client-files', [DashboardController::class, 'clientFilesPage'])->name('client-files');
     Route::get('/client-files/{clientSyncedFile}/download', [DashboardController::class, 'downloadClientFile'])->name('client-files.download');
+    Route::get('/client-file-versions/{clientFileVersion}/download', [DashboardController::class, 'downloadClientFileVersion'])->name('client-file-versions.download');
+    Route::post('/client-file-versions/{clientFileVersion}/restore', [DashboardController::class, 'restoreClientFileVersion'])->name('client-file-versions.restore');
     Route::get('/connection', [DashboardController::class, 'connectionPage'])->name('connection');
+    Route::get('/computers', [DashboardController::class, 'computersPage'])->name('computers');
+    Route::put('/computers/{computer}', [DashboardController::class, 'updateComputer'])->name('computers.update');
+    Route::get('/activity', [DashboardController::class, 'commandActivityPage'])->name('activity');
     Route::get('/security', [DashboardController::class, 'securityPage'])->name('security');
     Route::get('/status/computers', [DashboardController::class, 'computerStatus'])->name('status.computers');
     Route::post('/actions/open-url', [DashboardController::class, 'openNow'])->middleware('throttle:30,1')->name('actions.open-url');
@@ -41,3 +50,9 @@ Route::post('/client/heartbeat', [ClientApiController::class, 'heartbeat'])
 Route::post('/client/files/upload', [ClientApiController::class, 'uploadFile'])
     ->middleware('throttle:240,1')
     ->name('client.files.upload');
+Route::post('/client/commands/acknowledge', [ClientApiController::class, 'acknowledgeCommand'])
+    ->middleware('throttle:6000,1')
+    ->name('client.commands.acknowledge');
+Route::get('/client/file-versions/{clientFileVersion}/download', [ClientApiController::class, 'downloadClientFileVersion'])
+    ->middleware('throttle:240,1')
+    ->name('client.file-versions.download');

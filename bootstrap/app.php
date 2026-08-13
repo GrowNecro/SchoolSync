@@ -15,10 +15,11 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->validateCsrfTokens(except: [
             'client/heartbeat',
             'client/files/upload',
+            'client/commands/acknowledge',
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(
-            fn (Request $request) => $request->is('api/*') || $request->expectsJson(),
+            fn (Request $request) => $request->is('api/*') || $request->is('client/*') || $request->expectsJson(),
         );
     })->create();

@@ -20,4 +20,9 @@ class ClientSyncedFile extends Model
     {
         return $this->belongsTo(ClientComputer::class, 'client_computer_id');
     }
+
+    public function versions()
+    {
+        return $this->hasMany(ClientFileVersion::class)->latest();
+    }
 }
