@@ -5,8 +5,8 @@ set -Eeuo pipefail
 script_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 application_root="${APPLICATION_ROOT:-$(cd "$script_root/../.." && pwd -P)}"
 hosting_home="$(cd -- "${CPANEL_HOME:-${HOME:?HOME tidak tersedia}}" && pwd -P)"
-public_root_input="${PUBLIC_ROOT:-$hosting_home/public_html/schoolsync}"
-site_url="${SITE_URL:-}"
+public_root_input="${PUBLIC_ROOT:-$hosting_home/public_html/sch.grownecro.my.id}"
+site_url="${SITE_URL:-https://sch.grownecro.my.id}"
 backup_root="${BACKUP_ROOT:-$application_root/storage/app/deployment-backups}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
 backup_dir="$backup_root/$timestamp"
@@ -68,9 +68,13 @@ cp -a "$application_root/.env" "$backup_dir/.env.before-update"
 chmod 600 "$backup_dir/.env.before-update"
 
 if [[ -n "$site_url" ]]; then
-    printf '%s\n' 'Menyesuaikan APP_URL production...'
+    printf '%s\n' 'Menyesuaikan APP_URL dan lokasi storage publik...'
     set_env_value APP_URL "${site_url%/}"
+    set_env_value PUBLIC_FILES_URL "${site_url%/}/storage"
 fi
+
+mkdir -p "$public_root/storage"
+set_env_value PUBLIC_FILES_ROOT "$public_root/storage"
 
 if [[ -x "$hosting_home/bin/composer" ]]; then
     composer_command=("$hosting_home/bin/composer")
@@ -101,6 +105,8 @@ php artisan migrate --force
 php artisan db:seed --class=DatabaseSeeder --force
 php artisan optimize:clear
 
+EXPECTED_PUBLIC_FILES_ROOT="$public_root/storage" php -r 'require "vendor/autoload.php";$app=require "bootstrap/app.php";$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();$expected=realpath(getenv("EXPECTED_PUBLIC_FILES_ROOT"));$configured=realpath(config("filesystems.disks.public.root"));if($expected===false||$configured===false||$expected!==$configured){fwrite(STDERR,"Disk public Laravel tidak menunjuk ke document root/storage.".PHP_EOL);fwrite(STDERR,"Expected: ".getenv("EXPECTED_PUBLIC_FILES_ROOT").PHP_EOL);fwrite(STDERR,"Configured: ".config("filesystems.disks.public.root").PHP_EOL);exit(1);}'
+
 printf 'Membuat backup file publik di %s...\n' "$backup_dir"
 for target in index.php .htaccess .user.ini build favicon.ico robots.txt; do
     if [[ -e "$public_root/$target" ]]; then
@@ -129,7 +135,7 @@ for source in "$application_root/public/"*; do
 done
 shopt -u dotglob nullglob
 
-APP_ROOT="$application_root" FRONT_TEMPLATE="$front_template" FRONT_OUTPUT="$public_root/index.php.new" php -r '$root=var_export(getenv("APP_ROOT"),true);$template=file_get_contents(getenv("FRONT_TEMPLATE"));if($template===false){fwrite(STDERR,"Template index.php tidak dapat dibaca.".PHP_EOL);exit(1);}if(file_put_contents(getenv("FRONT_OUTPUT"),str_replace("'__SCHOOLSYNC_APP_ROOT__'",$root,$template))===false){fwrite(STDERR,"index.php production tidak dapat ditulis.".PHP_EOL);exit(1);}'
+APP_ROOT="$application_root" FRONT_TEMPLATE="$front_template" FRONT_OUTPUT="$public_root/index.php.new" php -r '$root=var_export(getenv("APP_ROOT"),true);$template=file_get_contents(getenv("FRONT_TEMPLATE"));if($template===false){fwrite(STDERR,"Template index.php tidak dapat dibaca.".PHP_EOL);exit(1);}if(file_put_contents(getenv("FRONT_OUTPUT"),str_replace("__SCHOOLSYNC_APP_ROOT__",$root,$template))===false){fwrite(STDERR,"index.php production tidak dapat ditulis.".PHP_EOL);exit(1);}'
 mv "$public_root/index.php.new" "$public_root/index.php"
 php -l "$public_root/index.php"
 
@@ -142,5 +148,6 @@ validate_build "$public_root/build"
 printf '\nDeployment SchoolSync selesai.\n'
 [[ -n "$site_url" ]] && printf 'Aplikasi: %s\n' "${site_url%/}"
 printf 'Public:   %s\n' "$public_root"
+printf 'Storage:  %s\n' "$public_root/storage"
 printf 'Backup:   %s\n' "$backup_dir"
 printf '%s\n' 'Periksa login admin, status komputer, installer, satu perintah browser, dan satu unduhan file.'

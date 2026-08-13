@@ -72,20 +72,20 @@ powershell -ExecutionPolicy Bypass -File deployment/local/push-main.ps1
 
 ## Deployment Rumahweb melalui GitHub
 
-Simpan repository Laravel di luar `public_html`, misalnya `~/schoolsync`, dan gunakan folder publik khusus, misalnya `~/public_html/schoolsync`. Jangan menaruh `.env`, `vendor`, `storage`, atau `tools` di document root. Folder `public/build` wajib ikut di-commit karena build dilakukan di lokal.
+Simpan repository Laravel di luar `public_html`, yaitu `~/SchoolSync`, dan gunakan document root subdomain `~/public_html/sch.grownecro.my.id`. Jangan menaruh `.env`, `vendor`, `storage`, atau `tools` di document root. Folder `public/build` wajib ikut di-commit karena build dilakukan di lokal.
 
-1. Untuk pertama kali, clone repository GitHub ke `~/schoolsync`.
+1. Untuk pertama kali, clone repository GitHub ke `~/SchoolSync`.
 2. Buat `.env` production dan database MySQL melalui cPanel. Berikan pengguna database **ALL PRIVILEGES**.
 3. Untuk deployment pertama maupun setiap pembaruan berikutnya, cukup jalankan updater yang sama:
 
 ```bash
-cd ~/schoolsync
-SITE_URL=https://domain-kamu.tld/schoolsync \
-PUBLIC_ROOT=$HOME/public_html/schoolsync \
+cd ~/SchoolSync
 bash deployment/rumahweb/update-main.sh
 ```
 
 Updater menjalankan `git pull --ff-only origin main`, memvalidasi aset Vite, membuat backup, memasang dependency production, membuat `APP_KEY` pada instalasi pertama, menjalankan migrasi dan seeder, membuat cache Laravel, lalu menyelaraskan isi `public` ke document root tanpa menghapus upload atau konten hosting lain. Nilai `SITE_URL` diterapkan ke `APP_URL`, sehingga URL installer dan endpoint klien mengikuti alamat aplikasi production.
+
+Updater tidak menjalankan `php artisan storage:link`. Untuk kompatibilitas shared hosting, updater membuat `public_html/sch.grownecro.my.id/storage` secara manual lalu mengarahkan `PUBLIC_FILES_ROOT` dan `PUBLIC_FILES_URL` langsung ke folder tersebut.
 
 Updater akan berhenti jika repository hosting memiliki perubahan lokal atau file yang belum dilacak. Backup setiap deployment disimpan di `storage/app/deployment-backups`.
 
