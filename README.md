@@ -54,7 +54,9 @@ Panel menerima semua jenis file sampai 100 MB per file. Klien menyinkronkannya k
 - `download?client=SchoolSync.ps1` untuk berkas aplikasi klien
 - `installer` untuk installer siap pakai
 
-Semua unduhan berasal langsung dari URL aplikasi, bukan GitHub. Endpoint PHP lama sudah dihapus dan klien versi 1.6.0 menggunakan route Laravel. Installer membuat heartbeat Windows yang berjalan sebagai `SYSTEM` sejak komputer menyala serta klien interaktif saat pengguna login. Dashboard membedakan status `Menyala`, `Siap Edge`, dan `Offline`. Heartbeat dikirim setiap 30 detik dan komputer dianggap offline setelah 90 detik tanpa heartbeat. Klien juga memeriksa versi terbaru setiap 60 detik; saat ada pembaruan, file aplikasi diunduh dari panel dan proses dimulai ulang otomatis.
+Semua unduhan berasal langsung dari URL aplikasi, bukan GitHub. Endpoint PHP lama sudah dihapus dan klien versi 1.7.0 menggunakan route Laravel. Installer membuat heartbeat Windows yang berjalan sebagai `SYSTEM` sejak komputer menyala serta klien interaktif saat pengguna login. Dashboard membedakan status `Menyala`, `Siap Edge`, dan `Offline`. Heartbeat dikirim setiap 30 detik dan komputer dianggap offline setelah 90 detik tanpa heartbeat. Klien juga memeriksa versi terbaru setiap 60 detik; saat ada pembaruan, file aplikasi diunduh dari panel dan proses dimulai ulang otomatis.
+
+Folder kerja `C:\SchoolSync\projects` disinkronkan dua arah. File baru atau berubah dari komputer klien diunggah ke penyimpanan privat server berdasarkan nama dan identitas komputer, lalu dapat dilihat serta diunduh admin melalui halaman **File dari komputer**. Semua jenis file didukung hingga 100 MB per file.
 
 ## Push lokal ke GitHub
 

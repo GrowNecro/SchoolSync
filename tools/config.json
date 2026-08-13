@@ -18,6 +18,7 @@
 
   "shutdown": {
     "enabled": true,
-    "warning": 10
+    "warning": 10,
+    "excluded_computers": []
   }
 }

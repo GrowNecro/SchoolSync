@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\ClientComputer;
+use App\Models\ClientSyncedFile;
 use App\Models\Project;
 use App\Models\RemoteCommand;
 use App\Models\Setting;
@@ -58,6 +59,7 @@ class DashboardController extends Controller
                 'edge' => 'Microsoft Edge', 'roblox' => 'Roblox Studio', 'vscode' => 'Visual Studio Code',
                 'scratch' => 'Scratch Desktop', 'construct' => 'Construct 3', 'python' => 'Python IDLE',
             ],
+            'computerNames' => ClientComputer::query()->distinct()->orderBy('computer_name')->pluck('computer_name'),
         ]);
     }
 
@@ -67,6 +69,28 @@ class DashboardController extends Controller
             'setting' => Setting::query()->with('project')->firstOrCreate([], Setting::defaults()),
             'projects' => Project::query()->latest('updated_at')->get(),
         ]);
+    }
+
+    public function clientFilesPage(): View
+    {
+        $computers = ClientComputer::query()
+            ->whereHas('syncedFiles')
+            ->with(['syncedFiles' => fn ($query) => $query->latest('synced_at')])
+            ->orderBy('computer_name')
+            ->get();
+
+        return view('client-files', ['computers' => $computers]);
+    }
+
+    public function downloadClientFile(ClientSyncedFile $clientSyncedFile): \Symfony\Component\HttpFoundation\BinaryFileResponse
+    {
+        abort_unless(Storage::disk('local')->exists($clientSyncedFile->storage_path), 404);
+
+        return response()->download(
+            Storage::disk('local')->path($clientSyncedFile->storage_path),
+            basename($clientSyncedFile->relative_path),
+            ['X-Content-Type-Options' => 'nosniff']
+        );
     }
 
     public function connectionPage(): View
@@ -96,6 +120,31 @@ class DashboardController extends Controller
         return redirect()->route('dashboard')->with('success', 'Perintah buka Edge sudah dikirim ke komputer SchoolSync yang aktif.');
     }
 
+    public function openAppNow(Request $request): RedirectResponse
+    {
+        $validated = $request->validate([
+            'app' => ['required', Rule::in(self::LAUNCHERS)],
+        ]);
+
+        $this->queueCommand('open_app', ['app' => $validated['app']]);
+
+        return redirect()->route('dashboard')->with('success', 'Perintah buka aplikasi sudah dikirim ke komputer SchoolSync yang aktif.');
+    }
+
+    public function shutdownNow(): RedirectResponse
+    {
+        $setting = Setting::query()->firstOrCreate([], Setting::defaults());
+        $excluded = array_values($setting->shutdown_excluded_computers ?? []);
+        $this->queueCommand('shutdown', ['excluded_computers' => $excluded]);
+
+        $message = 'Perintah shutdown sudah dikirim.';
+        if ($excluded !== []) {
+            $message .= ' '.count($excluded).' komputer dalam daftar pengecualian tetap menyala.';
+        }
+
+        return redirect()->route('dashboard')->with('success', $message);
+    }
+
     public function update(Request $request): RedirectResponse
     {
         $validated = $request->validate([
@@ -107,6 +156,9 @@ class DashboardController extends Controller
             'launcher' => ['nullable', 'array'],
             'launcher.*' => [Rule::in(self::LAUNCHERS)],
             'shutdown_warning' => ['required', 'integer', 'min:1', 'max:120'],
+            'shutdown_excluded_computers' => ['nullable', 'array', 'max:200'],
+            'shutdown_excluded_computers.*' => ['string', 'max:100', 'not_regex:/[\x00-\x1F\x7F]/'],
+            'shutdown_excluded_manual' => ['nullable', 'string', 'max:10000'],
         ]);
 
         $browser = array_values(array_filter(array_map(
@@ -118,6 +170,12 @@ class DashboardController extends Controller
             $browser
         )));
 
+        $excludedComputers = array_merge(
+            $validated['shutdown_excluded_computers'] ?? [],
+            preg_split('/\R/u', (string) ($validated['shutdown_excluded_manual'] ?? '')) ?: []
+        );
+        $excludedComputers = $this->uniqueComputerNames($excludedComputers);
+
         $setting = Setting::query()->firstOrCreate([], Setting::defaults());
         $setting->update([
             'schedule_day' => $validated['schedule_day'],
@@ -128,6 +186,7 @@ class DashboardController extends Controller
             'launcher' => array_values($validated['launcher'] ?? []),
             'shutdown_enabled' => $request->boolean('shutdown_enabled'),
             'shutdown_warning' => $validated['shutdown_warning'],
+            'shutdown_excluded_computers' => $excludedComputers,
         ]);
 
         return redirect()->route('settings')->with('success', 'Konfigurasi berhasil disimpan dan siap dibaca komputer lab.');
@@ -218,6 +277,40 @@ class DashboardController extends Controller
         }
 
         return $url;
+    }
+
+    private function queueCommand(string $action, array $payload): void
+    {
+        RemoteCommand::query()->where('expires_at', '<', now()->subDay())->delete();
+        RemoteCommand::query()->create([
+            'action' => $action,
+            'payload' => $payload,
+            'expires_at' => now()->addMinutes(10),
+        ]);
+    }
+
+    private function uniqueComputerNames(array $names): array
+    {
+        $unique = [];
+
+        foreach ($names as $name) {
+            $name = trim((string) $name);
+            if ($name === '') {
+                continue;
+            }
+            if (mb_strlen($name) > 100 || preg_match('/[\x00-\x1F\x7F]/', $name)) {
+                throw ValidationException::withMessages(['shutdown_excluded_manual' => 'Setiap nama komputer maksimal 100 karakter dan tidak boleh mengandung karakter kontrol.']);
+            }
+
+            $key = mb_strtolower($name);
+            $unique[$key] ??= $name;
+        }
+
+        if (count($unique) > 200) {
+            throw ValidationException::withMessages(['shutdown_excluded_manual' => 'Maksimal 200 komputer dapat dikecualikan.']);
+        }
+
+        return array_values($unique);
     }
 
     private function computerStatusData(): array

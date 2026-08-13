@@ -16,7 +16,9 @@ $script:LogsDir = Join-Path $script:RootDir 'logs'
 $script:ConfigPath = Join-Path $script:RootDir 'config.json'
 $script:ServerPath = Join-Path $script:RootDir 'server.json'
 $script:VersionPath = Join-Path $script:RootDir 'version.txt'
-$script:CommandStatePath = Join-Path $script:RootDir 'commands.json'
+$script:CommandStatePath = Join-Path $script:RootDir $(if ($HeartbeatOnly) { 'commands-heartbeat.json' } else { 'commands-interactive.json' })
+$script:LegacyCommandStatePath = Join-Path $script:RootDir 'commands.json'
+$script:ClientSyncStatePath = Join-Path $script:RootDir 'client-sync.json'
 $script:IdentityPath = Join-Path $script:RootDir 'identity.json'
 $script:LogPath = Join-Path $script:LogsDir 'schoolsync.log'
 
@@ -346,6 +348,86 @@ function Invoke-ResourceSync {
     }
 }
 
+function Invoke-ClientFileSync {
+    param([string]$ServerUrl)
+
+    if (-not $ServerUrl -or -not $script:InstallationId) { return }
+
+    Ensure-Directory $script:ProjectsDir
+    Add-Type -AssemblyName System.Net.Http
+    $syncState = @{}
+    if (Test-Path -LiteralPath $script:ClientSyncStatePath -PathType Leaf) {
+        try {
+            $savedState = Get-Content -LiteralPath $script:ClientSyncStatePath -Raw | ConvertFrom-Json
+            foreach ($property in $savedState.PSObject.Properties) {
+                $syncState[[string]$property.Name] = [string]$property.Value
+            }
+        } catch {
+            Write-Log "Invalid client sync state; rebuilding it: $($_.Exception.Message)"
+        }
+    }
+
+    $projectsRoot = [IO.Path]::GetFullPath($script:ProjectsDir)
+    if (-not $projectsRoot.EndsWith([IO.Path]::DirectorySeparatorChar)) {
+        $projectsRoot += [IO.Path]::DirectorySeparatorChar
+    }
+    $computerName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [Environment]::MachineName }
+    $uploadUri = "$($ServerUrl.TrimEnd('/'))/client/files/upload"
+    $changed = $false
+
+    foreach ($file in @(Get-ChildItem -LiteralPath $script:ProjectsDir -File -Recurse -Force -ErrorAction SilentlyContinue)) {
+        try {
+            if ($file.Length -gt 100MB) {
+                Write-Log "Client file exceeds 100 MB and was skipped: $($file.FullName)"
+                continue
+            }
+
+            $fullPath = [IO.Path]::GetFullPath($file.FullName)
+            if (-not $fullPath.StartsWith($projectsRoot, [StringComparison]::OrdinalIgnoreCase)) { continue }
+            $relativePath = $fullPath.Substring($projectsRoot.Length).Replace('\', '/')
+            if ([string]::IsNullOrWhiteSpace($relativePath)) { continue }
+            $hash = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($syncState[$relativePath] -eq $hash) { continue }
+
+            $httpClient = [Net.Http.HttpClient]::new()
+            $httpClient.DefaultRequestHeaders.Add('X-SchoolSync-Client', '1')
+            $form = [Net.Http.MultipartFormDataContent]::new()
+            $stream = $null
+            $fileContent = $null
+            try {
+                $form.Add([Net.Http.StringContent]::new($script:InstallationId), 'installation_id')
+                $form.Add([Net.Http.StringContent]::new($computerName), 'computer_name')
+                $form.Add([Net.Http.StringContent]::new($relativePath), 'relative_path')
+                $form.Add([Net.Http.StringContent]::new($hash), 'sha256')
+                $stream = [IO.File]::Open($fullPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+                $fileContent = [Net.Http.StreamContent]::new($stream)
+                $fileContent.Headers.ContentType = [Net.Http.Headers.MediaTypeHeaderValue]::new('application/octet-stream')
+                $form.Add($fileContent, 'file', $file.Name)
+                $response = $httpClient.PostAsync($uploadUri, $form).GetAwaiter().GetResult()
+                if (-not $response.IsSuccessStatusCode) {
+                    $responseBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                    throw "Server returned HTTP $([int]$response.StatusCode): $responseBody"
+                }
+            } finally {
+                if ($fileContent) { $fileContent.Dispose() }
+                if ($stream) { $stream.Dispose() }
+                $form.Dispose()
+                $httpClient.Dispose()
+            }
+
+            $syncState[$relativePath] = $hash
+            $changed = $true
+            Write-Log "Uploaded client file: $relativePath"
+        } catch {
+            Write-Log "Client file upload failed for $($file.FullName): $($_.Exception.Message)"
+        }
+    }
+
+    if ($changed) {
+        $syncState | ConvertTo-Json | Set-Content -LiteralPath $script:ClientSyncStatePath -Encoding UTF8
+    }
+}
+
 function Invoke-ProjectUpdate {
     param(
         [object]$Config,
@@ -359,6 +441,11 @@ function Invoke-ProjectUpdate {
 
     $targetPath = Join-Path $script:ProjectsDir $Config.project
     Ensure-Directory $script:ProjectsDir
+
+    if (Test-Path -LiteralPath $targetPath -PathType Leaf) {
+        Write-Log "Project $($Config.project) already exists locally; preserving client changes"
+        return
+    }
 
     if ($ServerUrl) {
         try {
@@ -392,6 +479,13 @@ function Invoke-RemoteCommands {
         } catch {
             Write-Log "Invalid command state; starting from zero: $($_.Exception.Message)"
         }
+    } elseif (Test-Path -LiteralPath $script:LegacyCommandStatePath -PathType Leaf) {
+        try {
+            $state = Get-Content -LiteralPath $script:LegacyCommandStatePath -Raw | ConvertFrom-Json
+            $lastId = [int64]$state.last_id
+        } catch {
+            Write-Log "Invalid legacy command state; starting from zero: $($_.Exception.Message)"
+        }
     }
 
     try {
@@ -403,6 +497,10 @@ function Invoke-RemoteCommands {
             $commandId = [int64]$command.id
             try {
                 if ([string]$command.action -eq 'open_edge') {
+                    if ($HeartbeatOnly) {
+                        Write-Log 'Skipped open_edge in SYSTEM heartbeat process'
+                        continue
+                    }
                     $url = [string]$command.payload.url
                     $parsedUrl = $null
                     $validUrl = [Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$parsedUrl) -and
@@ -417,6 +515,21 @@ function Invoke-RemoteCommands {
                     } else {
                         Start-Process -FilePath 'msedge.exe' -ArgumentList @('--new-window', $parsedUrl.AbsoluteUri)
                         Write-Log "Opened Edge immediately: $($parsedUrl.AbsoluteUri)"
+                    }
+                } elseif ([string]$command.action -eq 'open_app') {
+                    if ($HeartbeatOnly) {
+                        Write-Log 'Skipped open_app in SYSTEM heartbeat process'
+                        continue
+                    }
+                    Start-SchoolSyncApplication -Launcher ([string]$command.payload.app)
+                } elseif ([string]$command.action -eq 'shutdown') {
+                    if (Test-ShutdownExcluded -ComputerNames @($command.payload.excluded_computers)) {
+                        Write-Log 'Ignored immediate shutdown because this computer is excluded'
+                    } elseif ($script:DryRunMode) {
+                        Write-Log 'Dry run: would shut down computer immediately'
+                    } else {
+                        Write-Log 'Immediate shutdown command received'
+                        & shutdown.exe /s /t 0
                     }
                 } else {
                     Write-Log "Ignored unsupported remote command: $($command.action)"
@@ -469,6 +582,7 @@ function Start-ClientListener {
         $fileSyncCountdown--
         if ($fileSyncCountdown -le 0) {
             Invoke-ResourceSync -ServerUrl $ServerUrl
+            Invoke-ClientFileSync -ServerUrl $ServerUrl
             Invoke-Heartbeat -ServerUrl $ServerUrl
             $fileSyncCountdown = 12
         }
@@ -491,6 +605,7 @@ function Start-HeartbeatListener {
     Write-Log 'Startup heartbeat listener started'
     $updateCountdown = 2
     do {
+        Invoke-RemoteCommands -ServerUrl $ServerUrl
         Invoke-Heartbeat -ServerUrl $ServerUrl
         $updateCountdown--
         if ($updateCountdown -le 0) {
@@ -523,6 +638,15 @@ function Invoke-BrowserManager {
 function Invoke-AutoLauncher {
     param([object]$Config)
 
+    foreach ($launcher in @($Config.launcher)) {
+        if (-not $launcher) { continue }
+        Start-SchoolSyncApplication -Launcher ([string]$launcher)
+    }
+}
+
+function Start-SchoolSyncApplication {
+    param([string]$Launcher)
+
     $mapping = @{
         edge = { Start-Process -FilePath 'msedge.exe' }
         roblox = { Start-Process -FilePath 'robloxstudio.exe' -ErrorAction SilentlyContinue }
@@ -532,20 +656,29 @@ function Invoke-AutoLauncher {
         python = { Start-Process -FilePath 'pythonw.exe' -ErrorAction SilentlyContinue }
     }
 
-    foreach ($launcher in @($Config.launcher)) {
-        if (-not $launcher) { continue }
-
-        if ($mapping.ContainsKey($launcher)) {
+    if ($mapping.ContainsKey($Launcher)) {
             try {
-                & $mapping[$launcher]
-                Write-Log "Launched $launcher"
+                & $mapping[$Launcher]
+                Write-Log "Launched $Launcher"
             } catch {
-                Write-Log "Launcher failed: $launcher"
+                Write-Log "Launcher failed: $Launcher"
             }
-        } else {
-            Write-Log "Unsupported launcher: $launcher"
+    } else {
+        Write-Log "Unsupported launcher: $Launcher"
+    }
+}
+
+function Test-ShutdownExcluded {
+    param([object[]]$ComputerNames)
+
+    $computerName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [Environment]::MachineName }
+    foreach ($excludedName in @($ComputerNames)) {
+        if ([string]::Equals($computerName, ([string]$excludedName).Trim(), [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
         }
     }
+
+    return $false
 }
 
 function Invoke-AutoShutdown {
@@ -558,6 +691,11 @@ function Invoke-AutoShutdown {
 
     if (-not ($Config.shutdown.enabled)) {
         Write-Log 'Auto-shutdown disabled'
+        return
+    }
+
+    if (Test-ShutdownExcluded -ComputerNames @($Config.shutdown.excluded_computers)) {
+        Write-Log 'Auto-shutdown skipped because this computer is excluded'
         return
     }
 
@@ -597,6 +735,7 @@ function Invoke-AutoShutdown {
         $fileSyncCountdown--
         if ($fileSyncCountdown -le 0) {
             Invoke-ResourceSync -ServerUrl $ServerUrl
+            Invoke-ClientFileSync -ServerUrl $ServerUrl
             Invoke-Heartbeat -ServerUrl $ServerUrl
             $fileSyncCountdown = 6
         }
@@ -653,12 +792,14 @@ try {
         Start-HeartbeatListener -ServerUrl $ServerUrl -DryRun:$DryRun
         return
     }
+
     $config = Get-Config -ServerUrl $ServerUrl
     if (Invoke-SelfUpdate -ServerUrl $ServerUrl) {
         $script:RestartRequested = $true
         return
     }
     Invoke-ResourceSync -ServerUrl $ServerUrl
+    Invoke-ClientFileSync -ServerUrl $ServerUrl
     Invoke-Heartbeat -ServerUrl $ServerUrl
 
     $schedule = $config.schedule
@@ -695,6 +836,7 @@ try {
                     $fileSyncCountdown--
                     if ($fileSyncCountdown -le 0) {
                         Invoke-ResourceSync -ServerUrl $ServerUrl
+                        Invoke-ClientFileSync -ServerUrl $ServerUrl
                         Invoke-Heartbeat -ServerUrl $ServerUrl
                         $fileSyncCountdown = 6
                     }

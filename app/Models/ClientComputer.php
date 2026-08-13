@@ -15,4 +15,9 @@ class ClientComputer extends Model
             'last_interactive_at' => 'datetime',
         ];
     }
+
+    public function syncedFiles()
+    {
+        return $this->hasMany(ClientSyncedFile::class);
+    }
 }

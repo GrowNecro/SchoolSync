@@ -44,4 +44,22 @@
         </form>
         <small class="form-note">Perintah berlaku selama 10 menit dan diterima klien aktif dalam beberapa detik.</small>
     </section>
+
+    <section class="panel action-panel">
+        <div class="panel-heading"><div><span class="step">APP</span><h2>Buka aplikasi sekarang</h2><p>Jalankan aplikasi yang dipilih pada komputer dengan pengguna aktif.</p></div></div>
+        <form method="post" action="{{ route('actions.open-app') }}" class="instant-form">
+            @csrf
+            <label>Aplikasi<select name="app" required><option value="edge">Microsoft Edge</option><option value="roblox">Roblox Studio</option><option value="vscode">Visual Studio Code</option><option value="scratch">Scratch Desktop</option><option value="construct">Construct 3</option><option value="python">Python IDLE</option></select></label>
+            <button class="button primary" type="submit">Buka aplikasi sekarang</button>
+        </form>
+        <small class="form-note">Perintah diterima klien interaktif dalam beberapa detik.</small>
+    </section>
+
+    <section class="panel danger-panel">
+        <div class="panel-heading"><div><span class="step">OFF</span><h2>Shutdown sekarang</h2><p>Matikan komputer SchoolSync sekarang, kecuali komputer yang dikecualikan di Pengaturan.</p></div></div>
+        <form method="post" action="{{ route('actions.shutdown') }}" onsubmit="return confirm('Matikan semua komputer SchoolSync selain daftar pengecualian sekarang?')">
+            @csrf
+            <button class="button danger" type="submit">Shutdown komputer sekarang</button>
+        </form>
+    </section>
 @endsection

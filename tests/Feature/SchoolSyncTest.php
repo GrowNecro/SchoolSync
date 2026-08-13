@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\ClientComputer;
+use App\Models\ClientSyncedFile;
 use App\Models\Project;
 use App\Models\Setting;
 use App\Models\User;
@@ -54,6 +55,8 @@ class SchoolSyncTest extends TestCase
             'launcher' => ['edge', 'roblox'],
             'shutdown_enabled' => '1',
             'shutdown_warning' => 15,
+            'shutdown_excluded_computers' => ['LAB-GURU'],
+            'shutdown_excluded_manual' => "SERVER-KELAS\nlab-guru",
         ])->assertSessionHasNoErrors()->assertRedirect();
 
         $this->getJson('/client/config')->assertOk()->assertExactJson([
@@ -61,7 +64,7 @@ class SchoolSyncTest extends TestCase
             'project' => '',
             'browser' => ['https://classroom.google.com', 'https://example.com'],
             'launcher' => ['edge', 'roblox'],
-            'shutdown' => ['enabled' => true, 'warning' => 15],
+            'shutdown' => ['enabled' => true, 'warning' => 15, 'excluded_computers' => ['LAB-GURU', 'SERVER-KELAS']],
         ]);
     }
 
@@ -167,6 +170,75 @@ class SchoolSyncTest extends TestCase
             'url' => 'javascript:alert(1)',
         ])->assertSessionHasErrors('url');
         $this->assertDatabaseCount('remote_commands', 1);
+    }
+
+    public function test_admin_can_queue_open_app_and_shutdown_with_exclusions(): void
+    {
+        $user = User::factory()->create();
+        Setting::query()->create([
+            ...Setting::defaults(),
+            'shutdown_excluded_computers' => ['LAB-GURU', 'SERVER-KELAS'],
+        ]);
+
+        $this->actingAs($user)->post(route('actions.open-app'), ['app' => 'vscode'])
+            ->assertSessionHasNoErrors()->assertRedirect(route('dashboard'));
+        $this->assertDatabaseHas('remote_commands', ['action' => 'open_app']);
+        $this->getJson('/client/commands?after=0')->assertOk()->assertJsonFragment([
+            'action' => 'open_app',
+            'payload' => ['app' => 'vscode'],
+        ]);
+
+        $this->actingAs($user)->post(route('actions.shutdown'))
+            ->assertSessionHasNoErrors()->assertRedirect(route('dashboard'));
+        $this->getJson('/client/commands?after=0')->assertOk()->assertJsonFragment([
+            'action' => 'shutdown',
+            'payload' => ['excluded_computers' => ['LAB-GURU', 'SERVER-KELAS']],
+        ]);
+
+        $this->actingAs($user)->post(route('actions.open-app'), ['app' => 'cmd'])
+            ->assertSessionHasErrors('app');
+    }
+
+    public function test_client_files_are_grouped_privately_and_admin_can_download_them(): void
+    {
+        Storage::fake('local');
+        $installationId = (string) Str::uuid();
+        $contents = 'updated roblox project';
+
+        $this->postJson('/client/heartbeat', [
+            'installation_id' => $installationId,
+            'computer_name' => 'LAB-PC-01',
+            'version' => '1.7.0',
+            'interactive' => true,
+        ])->assertOk();
+
+        $this->withHeader('X-SchoolSync-Client', '1')->post('/client/files/upload', [
+            'installation_id' => $installationId,
+            'computer_name' => 'LAB-PC-01',
+            'relative_path' => 'kelas-8/proyek.rbxl',
+            'sha256' => hash('sha256', $contents),
+            'file' => UploadedFile::fake()->createWithContent('proyek.rbxl', $contents),
+        ])->assertOk()->assertJson(['ok' => true, 'path' => 'kelas-8/proyek.rbxl']);
+
+        $syncedFile = ClientSyncedFile::query()->with('computer')->firstOrFail();
+        $this->assertSame('LAB-PC-01', $syncedFile->computer->computer_name);
+        $this->assertStringContainsString('LAB-PC-01-'.$installationId, $syncedFile->storage_path);
+        Storage::disk('local')->assertExists($syncedFile->storage_path);
+
+        $this->get(route('client-files'))->assertRedirect(route('login'));
+        $user = User::factory()->create();
+        $this->actingAs($user)->get(route('client-files'))->assertOk()
+            ->assertSee('LAB-PC-01')->assertSee('kelas-8/proyek.rbxl');
+        $this->actingAs($user)->get(route('client-files.download', $syncedFile))
+            ->assertOk()->assertDownload('proyek.rbxl');
+
+        $this->withHeader('X-SchoolSync-Client', '1')->post('/client/files/upload', [
+            'installation_id' => $installationId,
+            'computer_name' => 'LAB-PC-01',
+            'relative_path' => '../outside.txt',
+            'sha256' => hash('sha256', 'x'),
+            'file' => UploadedFile::fake()->createWithContent('outside.txt', 'x'),
+        ])->assertSessionHasErrors('relative_path');
     }
 
     public function test_heartbeat_tracks_unique_active_computers_and_dashboard_status(): void

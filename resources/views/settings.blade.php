@@ -31,6 +31,27 @@
                 <label class="switch-label"><input type="checkbox" name="shutdown_enabled" value="1" @checked(old('shutdown_enabled', $setting->shutdown_enabled))><span class="switch"></span><span><b>Matikan komputer otomatis</b><small>Komputer dimatikan ketika sesi berakhir.</small></span></label>
                 <label class="warning-field">Peringatan sebelum selesai <span><input type="number" name="shutdown_warning" min="1" max="120" value="{{ old('shutdown_warning', $setting->shutdown_warning) }}"> menit</span></label>
             </div>
+            @php
+                $excludedComputers = old('shutdown_excluded_computers', $setting->shutdown_excluded_computers ?? []);
+                $knownComputerKeys = $computerNames->map(fn ($name) => mb_strtolower($name))->all();
+                $manualExcludedComputers = collect($setting->shutdown_excluded_computers ?? [])
+                    ->reject(fn ($name) => in_array(mb_strtolower($name), $knownComputerKeys, true))
+                    ->implode("\n");
+            @endphp
+            <div class="shutdown-exclusions">
+                <div>
+                    <span class="field-title">Komputer yang tidak boleh dimatikan</span>
+                    <small>Nama Windows dicocokkan tanpa membedakan huruf besar dan kecil.</small>
+                </div>
+                <div class="computer-check-grid">
+                    @forelse ($computerNames as $computerName)
+                        <label class="check"><input type="checkbox" name="shutdown_excluded_computers[]" value="{{ $computerName }}" @checked(in_array(mb_strtolower($computerName), array_map('mb_strtolower', $excludedComputers), true))><span><b>{{ $computerName }}</b><small>Tetap menyala</small></span></label>
+                    @empty
+                        <span class="empty-inline">Belum ada komputer terdaftar.</span>
+                    @endforelse
+                </div>
+                <label>Tambahkan nama komputer secara manual <span class="hint">Satu per baris</span><textarea name="shutdown_excluded_manual" rows="3" placeholder="LAB-GURU&#10;SERVER-KELAS">{{ old('shutdown_excluded_manual', $manualExcludedComputers) }}</textarea></label>
+            </div>
         </section>
         <div class="save-bar"><span>Perubahan baru diterapkan setelah disimpan.</span><button class="button primary" type="submit">Simpan konfigurasi</button></div>
     </form>

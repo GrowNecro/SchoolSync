@@ -3,12 +3,14 @@
 namespace App\Http\Controllers;
 
 use App\Models\ClientComputer;
+use App\Models\ClientSyncedFile;
 use App\Models\Project;
 use App\Models\RemoteCommand;
 use App\Models\Setting;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -83,6 +85,57 @@ class ClientApiController extends Controller
             ->header('X-Content-Type-Options', 'nosniff');
     }
 
+    public function uploadFile(Request $request): JsonResponse
+    {
+        if (! $request->hasHeader('X-SchoolSync-Client')) {
+            abort(403);
+        }
+
+        $validated = $request->validate([
+            'installation_id' => ['required', 'uuid'],
+            'computer_name' => ['required', 'string', 'max:100', 'not_regex:/[\x00-\x1F\x7F]/'],
+            'relative_path' => ['required', 'string', 'max:500', 'not_regex:/[\x00-\x1F\x7F]/'],
+            'sha256' => ['required', 'string', 'size:64', 'regex:/^[a-fA-F0-9]{64}$/'],
+            'file' => ['required', 'file', 'max:102400'],
+        ]);
+
+        $relativePath = $this->normalizeRelativePath($validated['relative_path']);
+        $uploadedFile = $request->file('file');
+        $actualHash = hash_file('sha256', $uploadedFile->getRealPath());
+        if (! hash_equals(strtolower($validated['sha256']), strtolower($actualHash))) {
+            throw ValidationException::withMessages(['file' => 'Checksum file tidak sesuai.']);
+        }
+
+        $computer = ClientComputer::query()
+            ->where('installation_id', $validated['installation_id'])
+            ->where('computer_name', $validated['computer_name'])
+            ->firstOrFail();
+        $computer->update(['ip_address' => $request->ip(), 'last_seen_at' => now()]);
+        $computerFolder = $this->safeFolderName($computer->computer_name).'-'.$computer->installation_id;
+        $storagePath = 'client-sync/'.$computerFolder.'/'.$relativePath;
+        $stream = fopen($uploadedFile->getRealPath(), 'rb');
+        try {
+            Storage::disk('local')->put($storagePath, $stream);
+        } finally {
+            if (is_resource($stream)) {
+                fclose($stream);
+            }
+        }
+
+        ClientSyncedFile::query()->updateOrCreate(
+            ['client_computer_id' => $computer->id, 'relative_path' => $relativePath],
+            [
+                'storage_path' => $storagePath,
+                'size' => $uploadedFile->getSize(),
+                'sha256' => strtolower($actualHash),
+                'synced_at' => now(),
+            ]
+        );
+
+        return response()->json(['ok' => true, 'path' => $relativePath])
+            ->header('Cache-Control', 'no-store, max-age=0');
+    }
+
     public function commands(Request $request): JsonResponse
     {
         $after = max(0, $request->integer('after'));
@@ -115,6 +168,7 @@ class ClientApiController extends Controller
             'shutdown' => [
                 'enabled' => (bool) ($values['shutdown_enabled'] ?? false),
                 'warning' => (int) ($values['shutdown_warning'] ?? 10),
+                'excluded_computers' => array_values($values['shutdown_excluded_computers'] ?? []),
             ],
         ])->header('Cache-Control', 'no-store, max-age=0');
     }
@@ -161,5 +215,29 @@ class ClientApiController extends Controller
             'Cache-Control' => 'no-store, max-age=0',
             'X-Content-Type-Options' => 'nosniff',
         ]);
+    }
+
+    private function normalizeRelativePath(string $path): string
+    {
+        $path = str_replace('\\', '/', trim($path));
+        $segments = explode('/', $path);
+        if ($path === '' || str_starts_with($path, '/') || preg_match('/^[A-Za-z]:/', $path)) {
+            throw ValidationException::withMessages(['relative_path' => 'Path file tidak valid.']);
+        }
+
+        foreach ($segments as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                throw ValidationException::withMessages(['relative_path' => 'Path file tidak valid.']);
+            }
+        }
+
+        return implode('/', $segments);
+    }
+
+    private function safeFolderName(string $name): string
+    {
+        $safe = preg_replace('/[^A-Za-z0-9._-]+/', '-', trim($name)) ?: 'computer';
+
+        return trim($safe, '.-') ?: 'computer';
     }
 }

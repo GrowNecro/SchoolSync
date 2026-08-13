@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 
 #[Fillable([
     'schedule_day', 'start_time', 'end_time', 'project_id', 'browser',
-    'launcher', 'shutdown_enabled', 'shutdown_warning',
+    'launcher', 'shutdown_enabled', 'shutdown_warning', 'shutdown_excluded_computers',
 ])]
 class Setting extends Model
 {
@@ -17,6 +17,7 @@ class Setting extends Model
             'browser' => 'array',
             'launcher' => 'array',
             'shutdown_enabled' => 'boolean',
+            'shutdown_excluded_computers' => 'array',
         ];
     }
 
@@ -35,6 +36,7 @@ class Setting extends Model
             'launcher' => ['edge', 'roblox'],
             'shutdown_enabled' => false,
             'shutdown_warning' => 10,
+            'shutdown_excluded_computers' => [],
         ];
     }
 }
