@@ -1,0 +1,10 @@
+storage/*
+!storage/.gitkeep
+!storage/.htaccess
+
+uploads/*
+!uploads/.gitkeep
+!uploads/.htaccess
+
+config/database.php
+config/database.php.tmp
