@@ -387,6 +387,18 @@ class SchoolSyncTest extends TestCase
         $computer = ClientComputer::query()->where('installation_id', $installationId)->firstOrFail();
         $this->assertSame('Windows 11 Pro', $computer->inventory['os']);
         $headers = ['Authorization' => 'Bearer '.$token];
+        $this->withHeaders($headers)->postJson('/client/heartbeat', [
+            'installation_id' => $installationId,
+            'computer_name' => 'LAB-PAIRING',
+            'version' => '2.0.1',
+            'interactive' => false,
+            'pairing_capable' => true,
+        ])->assertOk()->assertJsonPath('client_token', null);
+        $this->withHeader('Authorization', '')->postJson('/client/heartbeat', [
+            'installation_id' => $installationId,
+            'computer_name' => 'LAB-PAIRING',
+            'pairing_capable' => true,
+        ])->assertUnauthorized();
         $this->withHeaders($headers)->getJson('/client/config?installation_id='.$installationId)->assertForbidden();
 
         $admin = User::factory()->create();
@@ -394,7 +406,9 @@ class SchoolSyncTest extends TestCase
             'approved' => '1',
             'group_name' => 'LAB-B',
         ])->assertRedirect(route('computers'));
-        $this->withHeaders($headers)->getJson('/client/config?installation_id='.$installationId)->assertOk();
+        $this->withHeaders($headers)->getJson('/client/config?installation_id='.$installationId)
+            ->assertOk()
+            ->assertJsonPath('schedules', []);
     }
 
     public function test_admin_can_create_multiple_targeted_schedules_with_exam_mode(): void

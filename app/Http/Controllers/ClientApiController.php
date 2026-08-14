@@ -12,6 +12,7 @@ use App\Models\RemoteCommand;
 use App\Models\Setting;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -36,39 +37,43 @@ class ClientApiController extends Controller
             'inventory.roblox_version' => ['nullable', 'string', 'max:100'],
         ]);
 
-        $computer = ClientComputer::query()->where('installation_id', $validated['installation_id'])->first();
-        $isNewComputer = $computer === null;
-        if ($computer?->client_token_hash) {
-            $providedToken = $request->bearerToken();
-            abort_unless($providedToken && hash_equals($computer->client_token_hash, hash('sha256', $providedToken)), 401);
-        }
-
-        $updates = [
-            'computer_name' => $validated['computer_name'],
-            'version' => $validated['version'] ?? null,
-            'ip_address' => $request->ip(),
-            'last_seen_at' => now(),
-            'inventory' => $this->mergeInventory($computer, $validated['inventory'] ?? [], $request->boolean('interactive')),
-        ];
-        if ($request->boolean('interactive')) {
-            $updates['last_interactive_at'] = now();
-        }
-
-        if ($computer) {
-            $computer->update($updates);
-        } else {
-            $computer = ClientComputer::query()->create([
-                'installation_id' => $validated['installation_id'],
-                ...$updates,
+        $computer = ClientComputer::query()->createOrFirst(
+            ['installation_id' => $validated['installation_id']],
+            [
+                'computer_name' => $validated['computer_name'],
                 'approved' => false,
-            ]);
-        }
+                'last_seen_at' => now(),
+            ]
+        );
+        $isNewComputer = $computer->wasRecentlyCreated;
 
-        $issuedToken = null;
-        if ($request->boolean('pairing_capable') && ! $computer->client_token_hash) {
-            $issuedToken = Str::random(64);
-            $computer->update(['client_token_hash' => hash('sha256', $issuedToken)]);
-        }
+        [$computer, $issuedToken] = DB::transaction(function () use ($computer, $request, $validated): array {
+            $computer = ClientComputer::query()->lockForUpdate()->findOrFail($computer->id);
+            if ($computer->client_token_hash) {
+                $providedToken = $request->bearerToken();
+                abort_unless($providedToken && hash_equals($computer->client_token_hash, hash('sha256', $providedToken)), 401);
+            }
+
+            $updates = [
+                'computer_name' => $validated['computer_name'],
+                'version' => $validated['version'] ?? null,
+                'ip_address' => $request->ip(),
+                'last_seen_at' => now(),
+                'inventory' => $this->mergeInventory($computer, $validated['inventory'] ?? [], $request->boolean('interactive')),
+            ];
+            if ($request->boolean('interactive')) {
+                $updates['last_interactive_at'] = now();
+            }
+
+            $issuedToken = null;
+            if ($request->boolean('pairing_capable') && ! $computer->client_token_hash) {
+                $issuedToken = Str::random(64);
+                $updates['client_token_hash'] = hash('sha256', $issuedToken);
+            }
+            $computer->update($updates);
+
+            return [$computer, $issuedToken];
+        });
 
         ClientComputer::query()->where('last_seen_at', '<', now()->subDays(90))->delete();
 
@@ -298,9 +303,7 @@ class ClientApiController extends Controller
                     'blocked_processes' => array_values($schedule->blocked_processes ?? []),
                 ],
             ])->values();
-        if (ClassSchedule::query()->where('enabled', true)->exists()) {
-            $response['schedules'] = $schedules;
-        }
+        $response['schedules'] = $schedules;
 
         return response()->json($response)->header('Cache-Control', 'no-store, max-age=0');
     }

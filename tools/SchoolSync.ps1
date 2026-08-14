@@ -21,6 +21,7 @@ $script:LegacyCommandStatePath = Join-Path $script:RootDir 'commands.json'
 $script:ClientSyncStatePath = Join-Path $script:RootDir 'client-sync.json'
 $script:IdentityPath = Join-Path $script:RootDir 'identity.json'
 $script:TokenPath = Join-Path $script:RootDir 'client-token.txt'
+$script:HeartbeatLockPath = Join-Path $script:RootDir '.heartbeat.lock'
 $script:LogPath = Join-Path $script:LogsDir 'schoolsync.log'
 $script:InventoryCache = $null
 
@@ -117,7 +118,10 @@ function Get-ComputerInventory {
 }
 
 function Get-Config {
-    param([string]$ServerUrl)
+    param(
+        [string]$ServerUrl,
+        [switch]$RemoteOnly
+    )
 
     if ($ServerUrl) {
         try {
@@ -128,6 +132,7 @@ function Get-Config {
             return $config
         } catch {
             Write-Log "Control panel config unavailable: $($_.Exception.Message)"
+            if ($RemoteOnly) { throw }
         }
     }
 
@@ -219,7 +224,19 @@ function Invoke-Heartbeat {
 
     if (-not $ServerUrl -or -not $script:InstallationId) { return }
 
+    $heartbeatLock = $null
     try {
+        try {
+            $heartbeatLock = [IO.File]::Open(
+                $script:HeartbeatLockPath,
+                [IO.FileMode]::OpenOrCreate,
+                [IO.FileAccess]::ReadWrite,
+                [IO.FileShare]::None
+            )
+        } catch [IO.IOException] {
+            return
+        }
+
         $clientVersion = if (Test-Path -LiteralPath $script:VersionPath) { (Get-Content -LiteralPath $script:VersionPath -Raw).Trim() } else { '0.0.0' }
         $computerName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [Environment]::MachineName }
         $payload = @{
@@ -241,6 +258,8 @@ function Invoke-Heartbeat {
         }
     } catch {
         Write-Log "Heartbeat failed: $($_.Exception.Message)"
+    } finally {
+        if ($heartbeatLock) { $heartbeatLock.Dispose() }
     }
 }
 
@@ -934,6 +953,30 @@ function Invoke-ExamMode {
     }
 }
 
+function Get-LatestScheduleConfig {
+    param(
+        [string]$ServerUrl,
+        [object]$CurrentConfig
+    )
+
+    if (-not $ServerUrl -or -not $CurrentConfig.id) {
+        return $CurrentConfig
+    }
+
+    $panelConfig = Get-Config -ServerUrl $ServerUrl -RemoteOnly
+    if (-not ($panelConfig.PSObject.Properties.Name -contains 'schedules')) {
+        return $CurrentConfig
+    }
+
+    foreach ($scheduleConfig in @($panelConfig.schedules)) {
+        if ([string]$scheduleConfig.id -eq [string]$CurrentConfig.id) {
+            return $scheduleConfig
+        }
+    }
+
+    return $null
+}
+
 function Invoke-AutoShutdown {
     param(
         [object]$Config,
@@ -964,8 +1007,33 @@ function Invoke-AutoShutdown {
     $fileSyncCountdown = 6
     $heartbeatCountdown = 3
     $updateCountdown = 6
+    $configRefreshCountdown = 1
+    $examWasEnabled = [bool]($Config.exam -and $Config.exam.enabled)
 
     while ((Get-Date) -lt $EndTime) {
+        $configRefreshCountdown--
+        if ($configRefreshCountdown -le 0) {
+            try {
+                $latestConfig = Get-LatestScheduleConfig -ServerUrl $ServerUrl -CurrentConfig $Config
+                if (-not $latestConfig) {
+                    Write-Log "Schedule was disabled or removed; stopping active controls: $($Config.name)"
+                    return
+                }
+
+                $examIsEnabled = [bool]($latestConfig.exam -and $latestConfig.exam.enabled)
+                if ($examWasEnabled -and -not $examIsEnabled) {
+                    Write-Log "Exam mode was disabled from the control panel: $($latestConfig.name)"
+                }
+                $Config = $latestConfig
+                $examWasEnabled = $examIsEnabled
+                $shutdownAllowed = [bool]$Config.shutdown.enabled -and -not (Test-ShutdownExcluded -ComputerNames @($Config.shutdown.excluded_computers))
+                $warningMinutes = if ($Config.shutdown.warning) { [int]$Config.shutdown.warning } else { 10 }
+            } catch {
+                Write-Log "Active schedule refresh failed; keeping the last valid config: $($_.Exception.Message)"
+            }
+            $configRefreshCountdown = 3
+        }
+
         Invoke-ExamMode -Config $Config -DryRun:$DryRun
         Invoke-RemoteCommands -ServerUrl $ServerUrl
         $updateCountdown--
@@ -1088,7 +1156,28 @@ try {
             $fileSyncCountdown = 6
             $heartbeatCountdown = 3
             $updateCountdown = 6
+            $configRefreshCountdown = 1
+            $scheduleCancelled = $false
             while ((Get-Date) -lt $startTime) {
+                $configRefreshCountdown--
+                if ($configRefreshCountdown -le 0) {
+                    try {
+                        $latestConfig = Get-LatestScheduleConfig -ServerUrl $ServerUrl -CurrentConfig $sessionConfig
+                        if (-not $latestConfig) {
+                            Write-Log "Schedule was disabled or removed while waiting: $($sessionConfig.name)"
+                            $scheduleCancelled = $true
+                            break
+                        }
+                        $sessionConfig = $latestConfig
+                        $schedule = $sessionConfig.schedule
+                        $startTime = Get-DateTimeFromTimeString -TimeText ([string]$schedule.start)
+                        $endTime = Get-DateTimeFromTimeString -TimeText ([string]$schedule.end)
+                    } catch {
+                        Write-Log "Waiting schedule refresh failed; keeping the last valid config: $($_.Exception.Message)"
+                    }
+                    $configRefreshCountdown = 3
+                }
+
                 Invoke-RemoteCommands -ServerUrl $ServerUrl
                 $updateCountdown--
                 if ($updateCountdown -le 0) {
@@ -1113,6 +1202,7 @@ try {
                 if ($DryRun) { break }
                 Start-Sleep -Seconds 10
             }
+            if ($scheduleCancelled) { continue }
         }
 
         if ((Get-Date) -ge $startTime -and (Get-Date) -lt $endTime) {
