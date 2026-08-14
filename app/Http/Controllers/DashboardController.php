@@ -368,12 +368,18 @@ class DashboardController extends Controller
         $path = $file->storeAs('projects', $filename, 'local');
         $sha256 = hash_file('sha256', Storage::disk('local')->path($path));
         $extract = strtolower(pathinfo($filename, PATHINFO_EXTENSION)) === 'zip';
-        Project::query()->updateOrCreate(
+        $project = Project::query()->updateOrCreate(
             ['filename' => $filename],
             ['path' => $path, 'size' => $size, 'sha256' => $sha256, 'extract' => $extract]
         );
+        $this->queueCommandForTarget(
+            'refresh_files',
+            ['project_id' => $project->id, 'filename' => $project->filename],
+            'all',
+            null
+        );
 
-        return redirect()->route('files')->with('success', "File {$filename} berhasil diunggah.");
+        return redirect()->route('files')->with('success', "File {$filename} berhasil diunggah dan sinyal sinkronisasi dikirim.");
     }
 
     public function deleteProject(Project $project): RedirectResponse

@@ -26,6 +26,10 @@ $script:LogPath = Join-Path $script:LogsDir 'schoolsync.log'
 $script:InventoryCache = $null
 $script:ActiveExamConfigs = @()
 $script:ServerBackoffUntil = [datetime]::MinValue
+$script:ClientFileWatcher = $null
+$script:ClientFileEventSources = @()
+$script:ClientFileRetryPaths = @{}
+$script:ResourceSyncRetryAt = [datetime]::MaxValue
 
 function Write-Log {
     param([string]$Message)
@@ -99,6 +103,93 @@ function Set-ClientSyncStateHash {
 
     $syncState[$RelativePath.Replace('\', '/')] = $Hash.ToLowerInvariant()
     $syncState | ConvertTo-Json | Set-Content -LiteralPath $script:ClientSyncStatePath -Encoding UTF8
+}
+
+function Add-ClientFileRetry {
+    param(
+        [string[]]$Paths,
+        [datetime]$RetryAt = (Get-Date).AddSeconds(60)
+    )
+
+    foreach ($path in @($Paths)) {
+        if (-not [string]::IsNullOrWhiteSpace($path)) {
+            $script:ClientFileRetryPaths[$path] = $RetryAt
+        }
+    }
+}
+
+function Start-ClientFileWatcher {
+    if ($HeartbeatOnly -or $script:ClientFileWatcher) { return }
+
+    Ensure-Directory $script:ProjectsDir
+    $watcher = [IO.FileSystemWatcher]::new($script:ProjectsDir)
+    $watcher.IncludeSubdirectories = $true
+    $watcher.Filter = '*'
+    $watcher.NotifyFilter = [IO.NotifyFilters]::FileName -bor [IO.NotifyFilters]::DirectoryName -bor [IO.NotifyFilters]::LastWrite -bor [IO.NotifyFilters]::Size
+    $watcher.InternalBufferSize = 16384
+
+    $sourcePrefix = "SchoolSync.ClientFiles.$PID"
+    $sources = @(
+        "$sourcePrefix.Created",
+        "$sourcePrefix.Changed",
+        "$sourcePrefix.Renamed",
+        "$sourcePrefix.Error"
+    )
+    Register-ObjectEvent -InputObject $watcher -EventName Created -SourceIdentifier $sources[0] | Out-Null
+    Register-ObjectEvent -InputObject $watcher -EventName Changed -SourceIdentifier $sources[1] | Out-Null
+    Register-ObjectEvent -InputObject $watcher -EventName Renamed -SourceIdentifier $sources[2] | Out-Null
+    Register-ObjectEvent -InputObject $watcher -EventName Error -SourceIdentifier $sources[3] | Out-Null
+    $watcher.EnableRaisingEvents = $true
+
+    $script:ClientFileWatcher = $watcher
+    $script:ClientFileEventSources = $sources
+    Write-Log 'Client file watcher started; periodic project scans are disabled'
+}
+
+function Get-PendingClientFilePaths {
+    $pending = @{}
+
+    foreach ($source in @($script:ClientFileEventSources)) {
+        while ($true) {
+            $queuedEvent = Get-Event -SourceIdentifier $source -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $queuedEvent) { break }
+
+            if ($source.EndsWith('.Error')) {
+                $pending['*'] = $true
+                Write-Log 'Client file watcher overflowed; one recovery scan was queued'
+            } else {
+                $eventPath = [string]$queuedEvent.SourceEventArgs.FullPath
+                if (-not [string]::IsNullOrWhiteSpace($eventPath)) {
+                    $pending[$eventPath] = $true
+                }
+            }
+            Remove-Event -EventIdentifier $queuedEvent.EventIdentifier -ErrorAction SilentlyContinue
+        }
+    }
+
+    $now = Get-Date
+    foreach ($path in @($script:ClientFileRetryPaths.Keys)) {
+        if ($script:ClientFileRetryPaths[$path] -le $now) {
+            $pending[$path] = $true
+            $script:ClientFileRetryPaths.Remove($path)
+        }
+    }
+
+    return @($pending.Keys)
+}
+
+function Stop-ClientFileWatcher {
+    foreach ($source in @($script:ClientFileEventSources)) {
+        Unregister-Event -SourceIdentifier $source -ErrorAction SilentlyContinue
+        Get-Event -SourceIdentifier $source -ErrorAction SilentlyContinue | Remove-Event -ErrorAction SilentlyContinue
+    }
+    $script:ClientFileEventSources = @()
+
+    if ($script:ClientFileWatcher) {
+        $script:ClientFileWatcher.EnableRaisingEvents = $false
+        $script:ClientFileWatcher.Dispose()
+        $script:ClientFileWatcher = $null
+    }
 }
 
 function Get-ControlServerUrl {
@@ -430,7 +521,12 @@ function Invoke-ResourceSync {
         Write-Log 'No control panel URL configured; file sync skipped'
         return
     }
-    if (Test-ServerBackoff) { return }
+    if (Test-ServerBackoff) {
+        $script:ResourceSyncRetryAt = $script:ServerBackoffUntil.AddSeconds(5)
+        return
+    }
+
+    $script:ResourceSyncRetryAt = [datetime]::MaxValue
 
     Ensure-Directory $script:DownloadsDir
     $manifestUri = Add-ClientIdentityToUri -Uri "$($ServerUrl.TrimEnd('/'))/client/files"
@@ -438,6 +534,7 @@ function Invoke-ResourceSync {
         $manifest = Invoke-RestMethod -Uri $manifestUri -Method Get -Headers (Get-ClientHeaders)
     } catch {
         Register-ServerFailure -Failure $_ | Out-Null
+        $script:ResourceSyncRetryAt = if (Test-ServerBackoff) { $script:ServerBackoffUntil.AddSeconds(5) } else { (Get-Date).AddSeconds(60) }
         Write-Log "File manifest unavailable: $($_.Exception.Message)"
         return
     }
@@ -484,6 +581,8 @@ function Invoke-ResourceSync {
                 Expand-SafeArchive -ArchivePath $targetPath -DestinationPath $extractPath -Sha256 $archiveHash
             }
         } catch {
+            Register-ServerFailure -Failure $_ | Out-Null
+            $script:ResourceSyncRetryAt = if (Test-ServerBackoff) { $script:ServerBackoffUntil.AddSeconds(5) } else { (Get-Date).AddSeconds(60) }
             Write-Log "File sync failed: $($_.Exception.Message)"
         } finally {
             if ($tempPath -and (Test-Path -LiteralPath $tempPath)) {
@@ -493,10 +592,27 @@ function Invoke-ResourceSync {
     }
 }
 
-function Invoke-ClientFileSync {
+function Invoke-PendingResourceSync {
     param([string]$ServerUrl)
 
-    if (-not $ServerUrl -or -not $script:InstallationId -or (Test-ServerBackoff)) { return }
+    if ((Get-Date) -ge $script:ResourceSyncRetryAt) {
+        $script:ResourceSyncRetryAt = [datetime]::MaxValue
+        Invoke-ResourceSync -ServerUrl $ServerUrl
+    }
+}
+
+function Invoke-ClientFileSync {
+    param(
+        [string]$ServerUrl,
+        [string[]]$Paths
+    )
+
+    if (-not $ServerUrl -or -not $script:InstallationId) { return }
+    if (Test-ServerBackoff) {
+        $retryPaths = if (@($Paths).Count -gt 0) { @($Paths) } else { @('*') }
+        Add-ClientFileRetry -Paths $retryPaths -RetryAt $script:ServerBackoffUntil.AddSeconds(5)
+        return
+    }
 
     Ensure-Directory $script:ProjectsDir
     Add-Type -AssemblyName System.Net.Http
@@ -520,8 +636,26 @@ function Invoke-ClientFileSync {
     $uploadUri = "$($ServerUrl.TrimEnd('/'))/client/files/upload"
     $changed = $false
 
-    foreach ($file in @(Get-ChildItem -LiteralPath $script:ProjectsDir -File -Recurse -Force -ErrorAction SilentlyContinue)) {
+    $fileCandidates = @(
+        if (@($Paths).Count -eq 0 -or $Paths -contains '*') {
+            Get-ChildItem -LiteralPath $script:ProjectsDir -File -Recurse -Force -ErrorAction SilentlyContinue
+        } else {
+            foreach ($candidatePath in @($Paths | Select-Object -Unique)) {
+                if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
+                    Get-Item -LiteralPath $candidatePath -Force -ErrorAction SilentlyContinue
+                } elseif (Test-Path -LiteralPath $candidatePath -PathType Container) {
+                    Get-ChildItem -LiteralPath $candidatePath -File -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    )
+    $seenFiles = @{}
+
+    foreach ($file in $fileCandidates) {
         try {
+            $candidateKey = [IO.Path]::GetFullPath($file.FullName)
+            if ($seenFiles.ContainsKey($candidateKey)) { continue }
+            $seenFiles[$candidateKey] = $true
             if ($file.Length -gt 100MB) {
                 Write-Log "Client file exceeds 100 MB and was skipped: $($file.FullName)"
                 continue
@@ -568,12 +702,24 @@ function Invoke-ClientFileSync {
             Write-Log "Uploaded client file: $relativePath"
         } catch {
             Register-ServerFailure -Failure $_ | Out-Null
+            if ($file -and $file.FullName) {
+                Add-ClientFileRetry -Paths @([string]$file.FullName)
+            }
             Write-Log "Client file upload failed for $($file.FullName): $($_.Exception.Message)"
         }
     }
 
     if ($changed) {
         $syncState | ConvertTo-Json | Set-Content -LiteralPath $script:ClientSyncStatePath -Encoding UTF8
+    }
+}
+
+function Invoke-PendingClientFileSync {
+    param([string]$ServerUrl)
+
+    $paths = @(Get-PendingClientFilePaths)
+    if ($paths.Count -gt 0) {
+        Invoke-ClientFileSync -ServerUrl $ServerUrl -Paths $paths
     }
 }
 
@@ -793,6 +939,15 @@ function Invoke-RemoteCommands {
                 } elseif ([string]$command.action -eq 'refresh_exam_policy') {
                     Invoke-ActiveExamPolicies -ServerUrl $ServerUrl -DryRun:$script:DryRunMode
                     $executionMessage = 'Kebijakan mode ujian diperbarui.'
+                } elseif ([string]$command.action -eq 'refresh_files') {
+                    if (-not $HeartbeatOnly) {
+                        $executionStatus = 'skipped'
+                        $executionMessage = 'Sinkronisasi file ditangani oleh proses SYSTEM.'
+                        Write-Log 'Skipped refresh_files in interactive process'
+                        continue
+                    }
+                    Invoke-ResourceSync -ServerUrl $ServerUrl
+                    $executionMessage = 'Daftar file server diperbarui.'
                 } else {
                     $executionStatus = 'skipped'
                     $executionMessage = "Perintah tidak didukung: $($command.action)"
@@ -833,7 +988,6 @@ function Start-ClientListener {
     }
 
     Write-Log 'Background command listener started'
-    $fileSyncCountdown = 120
     $heartbeatCountdown = 24
     $updateCountdown = 120
     $examPolicyCountdown = 1
@@ -845,6 +999,7 @@ function Start-ClientListener {
             $examPolicyCountdown = 24
         }
         Invoke-CachedExamPolicies -DryRun:$DryRun
+        Invoke-PendingResourceSync -ServerUrl $ServerUrl
         $commandCountdown--
         if ($commandCountdown -le 0) {
             Invoke-RemoteCommands -ServerUrl $ServerUrl
@@ -863,13 +1018,7 @@ function Start-ClientListener {
             Invoke-Heartbeat -ServerUrl $ServerUrl
             $heartbeatCountdown = 24
         }
-        $fileSyncCountdown--
-        if ($fileSyncCountdown -le 0) {
-            Invoke-ResourceSync -ServerUrl $ServerUrl
-            Invoke-ClientFileSync -ServerUrl $ServerUrl
-            Invoke-Heartbeat -ServerUrl $ServerUrl
-            $fileSyncCountdown = 120
-        }
+        Invoke-PendingClientFileSync -ServerUrl $ServerUrl
         if ($DryRun) { return }
         Start-Sleep -Seconds 5
     } while ($true)
@@ -898,6 +1047,7 @@ function Start-HeartbeatListener {
             $examPolicyCountdown = 120
         }
         Invoke-CachedExamPolicies -DryRun:$DryRun
+        Invoke-PendingResourceSync -ServerUrl $ServerUrl
         $commandCountdown--
         if ($commandCountdown -le 0) {
             Invoke-RemoteCommands -ServerUrl $ServerUrl
@@ -1186,7 +1336,6 @@ function Invoke-AutoShutdown {
     }
 
     $warningTriggered = $false
-    $fileSyncCountdown = 60
     $heartbeatCountdown = 12
     $updateCountdown = 60
     $configRefreshCountdown = 12
@@ -1218,6 +1367,7 @@ function Invoke-AutoShutdown {
         }
 
         Invoke-ExamMode -Config $Config -DryRun:$DryRun
+        Invoke-PendingResourceSync -ServerUrl $ServerUrl
         $commandCountdown--
         if ($commandCountdown -le 0) {
             Invoke-RemoteCommands -ServerUrl $ServerUrl
@@ -1236,13 +1386,7 @@ function Invoke-AutoShutdown {
             Invoke-Heartbeat -ServerUrl $ServerUrl
             $heartbeatCountdown = 12
         }
-        $fileSyncCountdown--
-        if ($fileSyncCountdown -le 0) {
-            Invoke-ResourceSync -ServerUrl $ServerUrl
-            Invoke-ClientFileSync -ServerUrl $ServerUrl
-            Invoke-Heartbeat -ServerUrl $ServerUrl
-            $fileSyncCountdown = 60
-        }
+        Invoke-PendingClientFileSync -ServerUrl $ServerUrl
         $remaining = [Math]::Ceiling(($EndTime - (Get-Date)).TotalMinutes)
 
         if ($shutdownAllowed -and $remaining -le $warningMinutes -and -not $warningTriggered -and $remaining -gt 0) {
@@ -1327,6 +1471,7 @@ try {
     }
     Invoke-ResourceSync -ServerUrl $ServerUrl
     Invoke-ClientFileSync -ServerUrl $ServerUrl
+    Start-ClientFileWatcher
     Invoke-Heartbeat -ServerUrl $ServerUrl
 
     $hasMultiSchedule = $config.PSObject.Properties.Name -contains 'schedules'
@@ -1347,7 +1492,6 @@ try {
 
         if ((Get-Date) -lt $startTime) {
             Write-Log "Waiting for schedule: $($sessionConfig.name)"
-            $fileSyncCountdown = 60
             $heartbeatCountdown = 12
             $updateCountdown = 60
             $configRefreshCountdown = 12
@@ -1374,6 +1518,7 @@ try {
                 }
 
                 $commandCountdown--
+                Invoke-PendingResourceSync -ServerUrl $ServerUrl
                 if ($commandCountdown -le 0) {
                     Invoke-RemoteCommands -ServerUrl $ServerUrl
                     $commandCountdown = 2
@@ -1391,13 +1536,7 @@ try {
                     Invoke-Heartbeat -ServerUrl $ServerUrl
                     $heartbeatCountdown = 12
                 }
-                $fileSyncCountdown--
-                if ($fileSyncCountdown -le 0) {
-                    Invoke-ResourceSync -ServerUrl $ServerUrl
-                    Invoke-ClientFileSync -ServerUrl $ServerUrl
-                    Invoke-Heartbeat -ServerUrl $ServerUrl
-                    $fileSyncCountdown = 60
-                }
+                Invoke-PendingClientFileSync -ServerUrl $ServerUrl
                 if ($DryRun) { break }
                 Start-Sleep -Seconds 10
             }
@@ -1420,6 +1559,7 @@ try {
     Write-Log "SchoolSync failed: $($_.Exception.Message)"
     throw
 } finally {
+    Stop-ClientFileWatcher
     if ($script:ClientMutex) {
         try { $script:ClientMutex.ReleaseMutex() } catch {}
         $script:ClientMutex.Dispose()

@@ -96,6 +96,9 @@ class SchoolSyncTest extends TestCase
 
         $project = Project::query()->firstOrFail();
         Storage::disk('local')->assertExists($project->path);
+        $this->assertDatabaseHas('remote_commands', ['action' => 'refresh_files', 'target_type' => 'all']);
+        $this->withHeaders($headers)->getJson('/client/commands?after=0&installation_id='.$computer->installation_id)
+            ->assertOk()->assertJsonFragment(['action' => 'refresh_files']);
         $this->withHeaders($headers)->get('/download?file=Pertemuan-01.rbxl&installation_id='.$computer->installation_id)->assertOk()->assertDownload('Pertemuan-01.rbxl');
         $this->get('/api/project.php?file=Pertemuan-01.rbxl')->assertNotFound();
 
@@ -153,9 +156,13 @@ class SchoolSyncTest extends TestCase
         $this->assertStringContainsString("return @('RobloxPlayerBeta', 'RobloxPlayerLauncher', 'RobloxCrashHandler', 'Windows10Universal')", $clientScript);
         $this->assertStringContainsString('Invoke-CachedExamPolicies -DryRun:$DryRun', $clientScript);
         $this->assertStringContainsString("command.action -eq 'refresh_exam_policy'", $clientScript);
+        $this->assertStringContainsString("command.action -eq 'refresh_files'", $clientScript);
+        $this->assertStringContainsString('FileSystemWatcher', $clientScript);
+        $this->assertStringContainsString('Invoke-PendingClientFileSync -ServerUrl', $clientScript);
+        $this->assertStringNotContainsString('$fileSyncCountdown', $clientScript);
         $this->assertStringContainsString('Server rate limit reached; pausing requests', $clientScript);
         $this->assertStringContainsString('Set-ClientSyncStateHash -RelativePath', $clientScript);
-        $this->assertSame('2.0.4', trim(file_get_contents(base_path('tools/version.txt'))));
+        $this->assertSame('2.0.5', trim(file_get_contents(base_path('tools/version.txt'))));
         $this->get('/download?client=version.txt')->assertOk()->assertSee(trim(file_get_contents(base_path('tools/version.txt'))));
         $this->get('/download?client=forbidden.php')->assertNotFound();
         $this->get('/api/client.php?file=version.txt')->assertNotFound();
