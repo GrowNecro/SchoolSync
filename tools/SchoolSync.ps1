@@ -120,7 +120,8 @@ function Get-ComputerInventory {
 function Get-Config {
     param(
         [string]$ServerUrl,
-        [switch]$RemoteOnly
+        [switch]$RemoteOnly,
+        [switch]$Quiet
     )
 
     if ($ServerUrl) {
@@ -128,7 +129,7 @@ function Get-Config {
             $remoteUri = "$($ServerUrl.TrimEnd('/'))/client/config"
             $remoteUri = Add-ClientIdentityToUri -Uri $remoteUri
             $config = Invoke-RestMethod -Uri $remoteUri -Method Get -Headers (Get-ClientHeaders)
-            Write-Log "Loaded control panel config from $remoteUri"
+            if (-not $Quiet) { Write-Log "Loaded control panel config from $remoteUri" }
             return $config
         } catch {
             Write-Log "Control panel config unavailable: $($_.Exception.Message)"
@@ -751,7 +752,13 @@ function Start-ClientListener {
     $fileSyncCountdown = 12
     $heartbeatCountdown = 6
     $updateCountdown = 12
+    $examPolicyCountdown = 1
     do {
+        $examPolicyCountdown--
+        if ($examPolicyCountdown -le 0) {
+            Invoke-ActiveExamPolicies -ServerUrl $ServerUrl -DryRun:$DryRun
+            $examPolicyCountdown = 2
+        }
         Invoke-RemoteCommands -ServerUrl $ServerUrl
         $updateCountdown--
         if ($updateCountdown -le 0) {
@@ -790,20 +797,26 @@ function Start-HeartbeatListener {
     }
 
     Write-Log 'Startup heartbeat listener started'
-    $updateCountdown = 2
+    $heartbeatCountdown = 1
+    $updateCountdown = 1
     do {
+        Invoke-ActiveExamPolicies -ServerUrl $ServerUrl -DryRun:$DryRun
         Invoke-RemoteCommands -ServerUrl $ServerUrl
-        Invoke-Heartbeat -ServerUrl $ServerUrl
+        $heartbeatCountdown--
+        if ($heartbeatCountdown -le 0) {
+            Invoke-Heartbeat -ServerUrl $ServerUrl
+            $heartbeatCountdown = 3
+        }
         $updateCountdown--
         if ($updateCountdown -le 0) {
             if (Invoke-SelfUpdate -ServerUrl $ServerUrl -QuietWhenCurrent) {
                 $script:RestartRequested = $true
                 return
             }
-            $updateCountdown = 2
+            $updateCountdown = 6
         }
         if ($DryRun) { return }
-        Start-Sleep -Seconds 30
+        Start-Sleep -Seconds 10
     } while ($true)
 }
 
@@ -927,6 +940,17 @@ function Test-ShutdownExcluded {
     return $false
 }
 
+function Resolve-ExamProcessNames {
+    param([string]$ConfiguredName)
+
+    $normalized = ([IO.Path]::GetFileNameWithoutExtension($ConfiguredName)).ToLowerInvariant()
+    if ($normalized -eq 'roblox') {
+        return @('RobloxPlayerBeta', 'RobloxPlayerLauncher', 'RobloxCrashHandler', 'Windows10Universal')
+    }
+
+    return @($normalized)
+}
+
 function Invoke-ExamMode {
     param(
         [object]$Config,
@@ -938,18 +962,48 @@ function Invoke-ExamMode {
     foreach ($processName in @($Config.exam.blocked_processes)) {
         $normalized = ([IO.Path]::GetFileNameWithoutExtension([string]$processName)).ToLowerInvariant()
         if (-not $normalized -or $normalized -in $protected) { continue }
-        foreach ($process in @(Get-Process -Name $normalized -ErrorAction SilentlyContinue)) {
-            if ($DryRun) {
-                Write-Log "Dry run: exam mode would close process $normalized"
-            } else {
-                try {
-                    Stop-Process -Id $process.Id -Force -ErrorAction Stop
-                    Write-Log "Exam mode closed process $normalized"
-                } catch {
-                    Write-Log "Exam mode could not close ${normalized}: $($_.Exception.Message)"
+
+        foreach ($resolvedName in @(Resolve-ExamProcessNames -ConfiguredName $normalized)) {
+            foreach ($process in @(Get-Process -Name $resolvedName -ErrorAction SilentlyContinue)) {
+                if ($DryRun) {
+                    Write-Log "Dry run: exam mode would close process $resolvedName"
+                } else {
+                    try {
+                        Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                        Write-Log "Exam mode closed process $resolvedName"
+                    } catch {
+                        Write-Log "Exam mode could not close ${resolvedName}: $($_.Exception.Message)"
+                    }
                 }
             }
         }
+    }
+}
+
+function Invoke-ActiveExamPolicies {
+    param(
+        [string]$ServerUrl,
+        [switch]$DryRun
+    )
+
+    if (-not $ServerUrl) { return }
+
+    try {
+        $panelConfig = Get-Config -ServerUrl $ServerUrl -RemoteOnly -Quiet
+        if (-not ($panelConfig.PSObject.Properties.Name -contains 'schedules')) { return }
+
+        $now = Get-Date
+        $today = $now.DayOfWeek.ToString()
+        foreach ($scheduleConfig in @($panelConfig.schedules)) {
+            if (-not $scheduleConfig.schedule -or [string]$scheduleConfig.schedule.day -ne $today) { continue }
+            $startTime = Get-DateTimeFromTimeString -TimeText ([string]$scheduleConfig.schedule.start)
+            $endTime = Get-DateTimeFromTimeString -TimeText ([string]$scheduleConfig.schedule.end)
+            if ($now -ge $startTime -and $now -lt $endTime) {
+                Invoke-ExamMode -Config $scheduleConfig -DryRun:$DryRun
+            }
+        }
+    } catch {
+        Write-Log "Exam policy refresh failed: $($_.Exception.Message)"
     }
 }
 
@@ -963,7 +1017,7 @@ function Get-LatestScheduleConfig {
         return $CurrentConfig
     }
 
-    $panelConfig = Get-Config -ServerUrl $ServerUrl -RemoteOnly
+    $panelConfig = Get-Config -ServerUrl $ServerUrl -RemoteOnly -Quiet
     if (-not ($panelConfig.PSObject.Properties.Name -contains 'schedules')) {
         return $CurrentConfig
     }
@@ -1031,7 +1085,7 @@ function Invoke-AutoShutdown {
             } catch {
                 Write-Log "Active schedule refresh failed; keeping the last valid config: $($_.Exception.Message)"
             }
-            $configRefreshCountdown = 3
+            $configRefreshCountdown = 1
         }
 
         Invoke-ExamMode -Config $Config -DryRun:$DryRun
@@ -1175,7 +1229,7 @@ try {
                     } catch {
                         Write-Log "Waiting schedule refresh failed; keeping the last valid config: $($_.Exception.Message)"
                     }
-                    $configRefreshCountdown = 3
+                    $configRefreshCountdown = 1
                 }
 
                 Invoke-RemoteCommands -ServerUrl $ServerUrl

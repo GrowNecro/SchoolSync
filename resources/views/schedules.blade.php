@@ -38,7 +38,13 @@
 
     @forelse ($schedules as $schedule)
         <section class="panel schedule-card">
-            <div class="panel-heading"><div><span class="step">{{ $loop->iteration }}</span><h2>{{ $schedule->name }}</h2><p>{{ $days[$schedule->schedule_day] ?? $schedule->schedule_day }} · {{ substr($schedule->start_time, 0, 5) }}—{{ substr($schedule->end_time, 0, 5) }} · {{ $schedule->enabled ? 'Aktif' : 'Nonaktif' }}</p></div>@if ($schedule->exam_enabled)<span class="warning-badge">Mode ujian</span>@endif</div>
+            <div class="panel-heading">
+                <div><span class="step">{{ $loop->iteration }}</span><h2>{{ $schedule->name }}</h2><p>{{ $days[$schedule->schedule_day] ?? $schedule->schedule_day }} · {{ substr($schedule->start_time, 0, 5) }}—{{ substr($schedule->end_time, 0, 5) }} · {{ $schedule->enabled ? 'Aktif' : 'Nonaktif' }}</p></div>
+                <div class="schedule-heading-actions">
+                    <span class="{{ $schedule->exam_enabled ? 'warning-badge' : 'muted-badge' }}">Mode ujian {{ $schedule->exam_enabled ? 'aktif' : 'mati' }}</span>
+                    <form method="post" action="{{ route('schedules.exam-mode.update', $schedule) }}">@csrf @method('PATCH')<input type="hidden" name="exam_enabled" value="{{ $schedule->exam_enabled ? 0 : 1 }}"><button class="button compact {{ $schedule->exam_enabled ? 'secondary' : 'primary' }}" type="submit">{{ $schedule->exam_enabled ? 'Matikan sekarang' : 'Aktifkan sekarang' }}</button></form>
+                </div>
+            </div>
             <details><summary>Edit jadwal</summary>@include('partials.schedule-form', ['schedule' => $schedule])</details>
             <form method="post" action="{{ route('schedules.destroy', $schedule) }}" class="inline-delete" onsubmit="return confirm('Hapus jadwal {{ $schedule->name }}?')">@csrf @method('DELETE')<button class="delete-button" type="submit">Hapus jadwal</button></form>
         </section>

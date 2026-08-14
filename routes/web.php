@@ -18,6 +18,7 @@ Route::middleware('auth')->group(function (): void {
     Route::get('/schedules', [DashboardController::class, 'schedulesPage'])->name('schedules');
     Route::post('/schedules', [DashboardController::class, 'storeSchedule'])->name('schedules.store');
     Route::put('/schedules/shutdown-exclusions', [DashboardController::class, 'updateShutdownExclusions'])->name('schedules.exclusions.update');
+    Route::patch('/schedules/{schedule}/exam-mode', [DashboardController::class, 'updateScheduleExamMode'])->name('schedules.exam-mode.update');
     Route::put('/schedules/{schedule}', [DashboardController::class, 'updateSchedule'])->name('schedules.update');
     Route::delete('/schedules/{schedule}', [DashboardController::class, 'deleteSchedule'])->name('schedules.destroy');
     Route::get('/files', [DashboardController::class, 'filesPage'])->name('files');
@@ -40,7 +41,7 @@ Route::middleware('auth')->group(function (): void {
     Route::put('/password', [DashboardController::class, 'updatePassword'])->name('password.update');
 });
 
-Route::prefix('client')->middleware('throttle:240,1')->group(function (): void {
+Route::prefix('client')->middleware('throttle:6000,1')->group(function (): void {
     Route::get('/config', [ClientApiController::class, 'config'])->name('client.config');
     Route::get('/files', [ClientApiController::class, 'files'])->name('client.files');
     Route::get('/commands', [ClientApiController::class, 'commands'])->name('client.commands');

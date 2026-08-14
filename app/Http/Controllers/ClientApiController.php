@@ -300,7 +300,10 @@ class ClientApiController extends Controller
                 ],
                 'exam' => [
                     'enabled' => $schedule->exam_enabled,
-                    'blocked_processes' => array_values($schedule->blocked_processes ?? []),
+                    'blocked_processes' => array_values(array_unique([
+                        ...($schedule->blocked_processes ?? []),
+                        ...($schedule->exam_enabled ? ['roblox'] : []),
+                    ])),
                 ],
             ])->values();
         $response['schedules'] = $schedules;

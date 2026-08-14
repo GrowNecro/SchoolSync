@@ -103,6 +103,20 @@ class DashboardController extends Controller
         return redirect()->route('schedules')->with('success', "Jadwal {$schedule->name} berhasil diperbarui.");
     }
 
+    public function updateScheduleExamMode(Request $request, ClassSchedule $schedule): RedirectResponse
+    {
+        $validated = $request->validate([
+            'exam_enabled' => ['required', 'boolean'],
+        ]);
+        $enabled = (bool) $validated['exam_enabled'];
+        $schedule->update(['exam_enabled' => $enabled]);
+
+        return redirect()->route('schedules')->with(
+            'success',
+            'Mode ujian '.$schedule->name.' '.($enabled ? 'diaktifkan' : 'dinonaktifkan').'. Klien menerapkan perubahan maksimal sekitar 10 detik.'
+        );
+    }
+
     public function deleteSchedule(ClassSchedule $schedule): RedirectResponse
     {
         $name = $schedule->name;

@@ -54,13 +54,13 @@ Panel menerima semua jenis file sampai 100 MB per file. Klien menyinkronkannya k
 - `download?client=SchoolSync.ps1` untuk berkas aplikasi klien
 - `installer` untuk installer siap pakai
 
-Semua unduhan berasal langsung dari URL aplikasi, bukan GitHub. Endpoint PHP lama sudah dihapus dan klien versi 2.0.1 menggunakan route Laravel. Installer membuat heartbeat Windows yang berjalan sebagai `SYSTEM` sejak komputer menyala serta klien interaktif saat pengguna login. Dashboard membedakan status `Menyala`, `Siap Edge`, dan `Offline`. Heartbeat dikirim setiap 30 detik dan komputer dianggap offline setelah 90 detik tanpa heartbeat. Klien juga memeriksa versi terbaru setiap 60 detik; saat ada pembaruan, file aplikasi diunduh dari panel dan proses dimulai ulang otomatis.
+Semua unduhan berasal langsung dari URL aplikasi, bukan GitHub. Endpoint PHP lama sudah dihapus dan klien versi 2.0.2 menggunakan route Laravel. Installer membuat heartbeat Windows yang berjalan sebagai `SYSTEM` sejak komputer menyala serta klien interaktif saat pengguna login. Dashboard membedakan status `Menyala`, `Siap Edge`, dan `Offline`. Heartbeat dikirim setiap 30 detik dan komputer dianggap offline setelah 90 detik tanpa heartbeat. Klien juga memeriksa versi terbaru setiap 60 detik; saat ada pembaruan, file aplikasi diunduh dari panel dan proses dimulai ulang otomatis.
 
 Untuk Roblox Studio, klien mencari `RobloxStudioBeta.exe` pada `%LOCALAPPDATA%\Roblox\Versions`, memilih instalasi terbaru, dan membuka proyek aktif dari `C:\SchoolSync\projects` bila tersedia.
 
 Folder kerja `C:\SchoolSync\projects` disinkronkan dua arah. File baru atau berubah dari komputer klien diunggah ke penyimpanan privat server berdasarkan nama dan identitas komputer, lalu dapat dilihat serta diunduh admin melalui halaman **File dari komputer**. Semua jenis file didukung hingga 100 MB per file.
 
-Klien 2.0.1 memakai pairing token per perangkat. Komputer baru harus disetujui admin sebelum menerima konfigurasi, file, atau perintah. Panel mendukung target semua komputer, grup, atau satu komputer; laporan hasil perintah; inventaris perangkat; riwayat versi file dan pemulihan; multi-jadwal; serta mode ujian berbasis pemblokiran proses selama sesi. Konfigurasi jadwal aktif dibaca ulang secara berkala agar mode ujian langsung berhenti setelah dinonaktifkan dari panel.
+Klien 2.0.2 memakai pairing token per perangkat. Komputer baru harus disetujui admin sebelum menerima konfigurasi, file, atau perintah. Panel mendukung target semua komputer, grup, atau satu komputer; laporan hasil perintah; inventaris perangkat; riwayat versi file dan pemulihan; multi-jadwal; serta mode ujian berbasis pemblokiran proses selama sesi. Mode ujian dapat diaktifkan atau dimatikan dari kartu jadwal ketika sesi sedang berlangsung, diterapkan klien maksimal sekitar 10 detik, dan selalu memblokir Roblox Player tanpa menutup Roblox Studio.
 
 ## Push lokal ke GitHub
 
@@ -95,7 +95,7 @@ Updater tidak menjalankan `php artisan storage:link`. Untuk kompatibilitas share
 
 Updater akan berhenti jika repository hosting memiliki perubahan lokal atau file yang belum dilacak. Backup setiap deployment disimpan di `storage/app/deployment-backups`.
 
-Setelah pembaruan ke klien 2.0.1, buka menu **Komputer & grup**. Komputer yang sudah terdaftar sebelum migrasi tetap disetujui otomatis, sedangkan instalasi baru harus disetujui admin dan dapat dimasukkan ke grup sebelum menerima jadwal maupun perintah. Status setiap perintah dapat dipantau melalui menu **Aktivitas**.
+Setelah pembaruan ke klien 2.0.2, buka menu **Komputer & grup**. Komputer yang sudah terdaftar sebelum migrasi tetap disetujui otomatis, sedangkan instalasi baru harus disetujui admin dan dapat dimasukkan ke grup sebelum menerima jadwal maupun perintah. Status setiap perintah dapat dipantau melalui menu **Aktivitas**.
 
 Jika muncul `SQLSTATE[HY000] [1044]`, hubungkan ulang pengguna MySQL ke database dengan seluruh hak akses lalu jalankan `php artisan migrate --force`.
 

@@ -149,6 +149,9 @@ class SchoolSyncTest extends TestCase
 
     public function test_client_files_and_generated_installer_are_available(): void
     {
+        $clientScript = file_get_contents(base_path('tools/SchoolSync.ps1'));
+        $this->assertStringContainsString("return @('RobloxPlayerBeta', 'RobloxPlayerLauncher', 'RobloxCrashHandler', 'Windows10Universal')", $clientScript);
+        $this->assertSame('2.0.2', trim(file_get_contents(base_path('tools/version.txt'))));
         $this->get('/download?client=version.txt')->assertOk()->assertSee(trim(file_get_contents(base_path('tools/version.txt'))));
         $this->get('/download?client=forbidden.php')->assertNotFound();
         $this->get('/api/client.php?file=version.txt')->assertNotFound();
@@ -437,8 +440,22 @@ class SchoolSyncTest extends TestCase
             ->assertOk()
             ->assertJsonFragment([
                 'name' => 'Ujian Kelas 9',
-                'exam' => ['enabled' => true, 'blocked_processes' => ['discord', 'steam']],
+                'exam' => ['enabled' => true, 'blocked_processes' => ['discord', 'steam', 'roblox']],
             ]);
+
+        $this->actingAs($admin)->patch(route('schedules.exam-mode.update', $schedule), [
+            'exam_enabled' => '0',
+        ])->assertSessionHasNoErrors()->assertRedirect(route('schedules'));
+        $this->assertFalse($schedule->fresh()->exam_enabled);
+        $this->withHeaders($headers)->getJson('/client/config?installation_id='.$computer->installation_id)
+            ->assertOk()
+            ->assertJsonPath('schedules.0.exam.enabled', false)
+            ->assertJsonPath('schedules.0.exam.blocked_processes', ['discord', 'steam']);
+
+        $this->actingAs($admin)->patch(route('schedules.exam-mode.update', $schedule), [
+            'exam_enabled' => '1',
+        ])->assertSessionHasNoErrors()->assertRedirect(route('schedules'));
+        $this->assertTrue($schedule->fresh()->exam_enabled);
     }
 
     public function test_old_settings_page_redirects_to_schedules_and_shutdown_exclusions_live_there(): void
