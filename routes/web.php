@@ -35,6 +35,7 @@ Route::middleware('auth')->group(function (): void {
     Route::post('/actions/open-url', [DashboardController::class, 'openNow'])->middleware('throttle:30,1')->name('actions.open-url');
     Route::post('/actions/open-app', [DashboardController::class, 'openAppNow'])->middleware('throttle:30,1')->name('actions.open-app');
     Route::post('/actions/shutdown', [DashboardController::class, 'shutdownNow'])->middleware('throttle:10,1')->name('actions.shutdown');
+    Route::post('/actions/sync-files', [DashboardController::class, 'syncFilesNow'])->middleware('throttle:10,1')->name('actions.sync-files');
     Route::put('/settings', [DashboardController::class, 'update'])->name('settings.update');
     Route::post('/projects', [DashboardController::class, 'uploadProject'])->name('projects.store');
     Route::delete('/projects/{project}', [DashboardController::class, 'deleteProject'])->name('projects.destroy');

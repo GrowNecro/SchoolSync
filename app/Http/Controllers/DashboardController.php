@@ -146,7 +146,28 @@ class DashboardController extends Controller
         return view('files', [
             'setting' => Setting::query()->with('project')->firstOrCreate([], Setting::defaults()),
             'projects' => Project::query()->latest('updated_at')->get(),
+            'commandTargets' => $this->commandTargetOptions(),
         ]);
+    }
+
+    public function syncFilesNow(Request $request): RedirectResponse
+    {
+        $validated = $request->validate([
+            'target' => ['required', 'string', 'max:200'],
+        ]);
+        $fileCount = Project::query()->count();
+        if ($fileCount === 0) {
+            return redirect()->route('files')->with('success', 'Belum ada file server yang dapat disinkronkan.');
+        }
+
+        $this->queueCommand(
+            'refresh_files',
+            ['manual' => true, 'file_count' => $fileCount],
+            $validated['target'],
+            10080
+        );
+
+        return redirect()->route('files')->with('success', "Sinkronisasi manual {$fileCount} file dijadwalkan untuk target terpilih selama 7 hari.");
     }
 
     public function clientFilesPage(): View
@@ -382,7 +403,8 @@ class DashboardController extends Controller
             'refresh_files',
             ['project_id' => $project->id, 'filename' => $project->filename],
             'all',
-            null
+            null,
+            10080
         );
 
         return redirect()->route('files')->with('success', "File {$filename} berhasil diunggah dan sinyal sinkronisasi dikirim.");

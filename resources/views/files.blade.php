@@ -15,4 +15,13 @@
             @empty <div class="empty">Belum ada file yang diunggah.</div> @endforelse
         </div>
     </section>
+    <section class="panel">
+        <div class="panel-heading"><div><span class="step">SYNC</span><h2>Sinkronisasi manual</h2><p>Kirim ulang daftar file server ke komputer yang belum menerima. File yang sudah sama tidak diunduh ulang.</p></div></div>
+        <form method="post" action="{{ route('actions.sync-files') }}" class="instant-form manual-sync-form" onsubmit="return confirm('Kirim perintah sinkronisasi file ke target ini?')">
+            @csrf
+            <label>Target<select name="target" required>@foreach ($commandTargets as $target)<option value="{{ $target['value'] }}">{{ $target['label'] }}</option>@endforeach</select></label>
+            <button class="button primary" type="submit">Sinkronkan sekarang</button>
+        </form>
+        <small class="form-note">Perintah tetap tersedia selama 7 hari, sehingga komputer yang sedang mati dapat menjalankannya setelah menyala.</small>
+    </section>
 @endsection

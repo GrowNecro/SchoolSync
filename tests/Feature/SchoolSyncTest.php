@@ -97,8 +97,23 @@ class SchoolSyncTest extends TestCase
         $project = Project::query()->firstOrFail();
         Storage::disk('local')->assertExists($project->path);
         $this->assertDatabaseHas('remote_commands', ['action' => 'refresh_files', 'target_type' => 'all']);
+        $automaticCommand = \App\Models\RemoteCommand::query()->firstOrFail();
+        $this->assertTrue($automaticCommand->expires_at->gte(now()->addDays(6)));
         $this->withHeaders($headers)->getJson('/client/commands?after=0&installation_id='.$computer->installation_id)
             ->assertOk()->assertJsonFragment(['action' => 'refresh_files']);
+        $this->actingAs($user)->get(route('files'))->assertOk()->assertSee('Sinkronkan sekarang');
+        $this->actingAs($user)->post(route('actions.sync-files'), [
+            'target' => 'computer:'.$computer->installation_id,
+        ])->assertSessionHasNoErrors()->assertRedirect(route('files'));
+        $manualCommand = \App\Models\RemoteCommand::query()->latest('id')->firstOrFail();
+        $this->assertSame('refresh_files', $manualCommand->action);
+        $this->assertSame('computer', $manualCommand->target_type);
+        $this->assertSame([$computer->installation_id], $manualCommand->target_value);
+        $this->assertTrue($manualCommand->payload['manual']);
+        $this->assertSame(1, $manualCommand->payload['file_count']);
+        $this->assertTrue($manualCommand->expires_at->gte(now()->addDays(6)));
+        $this->withHeaders($headers)->getJson('/client/commands?after='.$automaticCommand->id.'&installation_id='.$computer->installation_id)
+            ->assertOk()->assertJsonFragment(['id' => $manualCommand->id, 'action' => 'refresh_files']);
         $this->withHeaders($headers)->get('/download?file=Pertemuan-01.rbxl&installation_id='.$computer->installation_id)->assertOk()->assertDownload('Pertemuan-01.rbxl');
         $this->get('/api/project.php?file=Pertemuan-01.rbxl')->assertNotFound();
 

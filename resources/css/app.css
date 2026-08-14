@@ -542,6 +542,7 @@ input:focus, select:focus, textarea:focus { border-color: #5a9c7f; background: w
 }
 .instant-form { grid-template-columns: minmax(0, 1fr) minmax(210px, .55fr) auto; gap: 12px; }
 .instant-form .button { min-width: 205px; }
+.manual-sync-form { grid-template-columns: minmax(0, 1fr) auto; }
 .danger-panel { border-color: #f0d4d0; background: #fffafa; }
 .danger-panel .step { background: #fde8e5; color: #a1372c; }
 .button.danger { background: #b33b31; color: white; }
