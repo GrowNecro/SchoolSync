@@ -151,7 +151,8 @@ class SchoolSyncTest extends TestCase
     {
         $clientScript = file_get_contents(base_path('tools/SchoolSync.ps1'));
         $this->assertStringContainsString("return @('RobloxPlayerBeta', 'RobloxPlayerLauncher', 'RobloxCrashHandler', 'Windows10Universal')", $clientScript);
-        $this->assertSame('2.0.2', trim(file_get_contents(base_path('tools/version.txt'))));
+        $this->assertStringContainsString('Invoke-CachedExamPolicies -DryRun:$DryRun', $clientScript);
+        $this->assertSame('2.0.3', trim(file_get_contents(base_path('tools/version.txt'))));
         $this->get('/download?client=version.txt')->assertOk()->assertSee(trim(file_get_contents(base_path('tools/version.txt'))));
         $this->get('/download?client=forbidden.php')->assertNotFound();
         $this->get('/api/client.php?file=version.txt')->assertNotFound();

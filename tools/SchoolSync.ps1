@@ -24,6 +24,7 @@ $script:TokenPath = Join-Path $script:RootDir 'client-token.txt'
 $script:HeartbeatLockPath = Join-Path $script:RootDir '.heartbeat.lock'
 $script:LogPath = Join-Path $script:LogsDir 'schoolsync.log'
 $script:InventoryCache = $null
+$script:ActiveExamConfigs = @()
 
 function Write-Log {
     param([string]$Message)
@@ -759,6 +760,7 @@ function Start-ClientListener {
             Invoke-ActiveExamPolicies -ServerUrl $ServerUrl -DryRun:$DryRun
             $examPolicyCountdown = 2
         }
+        Invoke-CachedExamPolicies -DryRun:$DryRun
         Invoke-RemoteCommands -ServerUrl $ServerUrl
         $updateCountdown--
         if ($updateCountdown -le 0) {
@@ -797,15 +799,26 @@ function Start-HeartbeatListener {
     }
 
     Write-Log 'Startup heartbeat listener started'
+    $examPolicyCountdown = 1
+    $commandCountdown = 1
     $heartbeatCountdown = 1
     $updateCountdown = 1
     do {
-        Invoke-ActiveExamPolicies -ServerUrl $ServerUrl -DryRun:$DryRun
-        Invoke-RemoteCommands -ServerUrl $ServerUrl
+        $examPolicyCountdown--
+        if ($examPolicyCountdown -le 0) {
+            Invoke-ActiveExamPolicies -ServerUrl $ServerUrl -DryRun:$DryRun
+            $examPolicyCountdown = 10
+        }
+        Invoke-CachedExamPolicies -DryRun:$DryRun
+        $commandCountdown--
+        if ($commandCountdown -le 0) {
+            Invoke-RemoteCommands -ServerUrl $ServerUrl
+            $commandCountdown = 10
+        }
         $heartbeatCountdown--
         if ($heartbeatCountdown -le 0) {
             Invoke-Heartbeat -ServerUrl $ServerUrl
-            $heartbeatCountdown = 3
+            $heartbeatCountdown = 30
         }
         $updateCountdown--
         if ($updateCountdown -le 0) {
@@ -813,10 +826,10 @@ function Start-HeartbeatListener {
                 $script:RestartRequested = $true
                 return
             }
-            $updateCountdown = 6
+            $updateCountdown = 60
         }
         if ($DryRun) { return }
-        Start-Sleep -Seconds 10
+        Start-Sleep -Seconds 1
     } while ($true)
 }
 
@@ -994,16 +1007,43 @@ function Invoke-ActiveExamPolicies {
 
         $now = Get-Date
         $today = $now.DayOfWeek.ToString()
+        $activeConfigs = @()
         foreach ($scheduleConfig in @($panelConfig.schedules)) {
             if (-not $scheduleConfig.schedule -or [string]$scheduleConfig.schedule.day -ne $today) { continue }
             $startTime = Get-DateTimeFromTimeString -TimeText ([string]$scheduleConfig.schedule.start)
             $endTime = Get-DateTimeFromTimeString -TimeText ([string]$scheduleConfig.schedule.end)
-            if ($now -ge $startTime -and $now -lt $endTime) {
-                Invoke-ExamMode -Config $scheduleConfig -DryRun:$DryRun
+            if ($now -ge $startTime -and $now -lt $endTime -and $scheduleConfig.exam -and [bool]$scheduleConfig.exam.enabled) {
+                $activeConfigs += $scheduleConfig
             }
         }
+
+        $wasActive = @($script:ActiveExamConfigs).Count -gt 0
+        $script:ActiveExamConfigs = @($activeConfigs)
+        $isActive = @($script:ActiveExamConfigs).Count -gt 0
+        if (-not $wasActive -and $isActive) {
+            Write-Log 'Automatic exam process detection enabled'
+        } elseif ($wasActive -and -not $isActive) {
+            Write-Log 'Automatic exam process detection disabled'
+        }
+
+        Invoke-CachedExamPolicies -DryRun:$DryRun
     } catch {
         Write-Log "Exam policy refresh failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-CachedExamPolicies {
+    param([switch]$DryRun)
+
+    $now = Get-Date
+    $today = $now.DayOfWeek.ToString()
+    foreach ($scheduleConfig in @($script:ActiveExamConfigs)) {
+        if (-not $scheduleConfig.schedule -or [string]$scheduleConfig.schedule.day -ne $today) { continue }
+        $startTime = Get-DateTimeFromTimeString -TimeText ([string]$scheduleConfig.schedule.start)
+        $endTime = Get-DateTimeFromTimeString -TimeText ([string]$scheduleConfig.schedule.end)
+        if ($now -ge $startTime -and $now -lt $endTime) {
+            Invoke-ExamMode -Config $scheduleConfig -DryRun:$DryRun
+        }
     }
 }
 
