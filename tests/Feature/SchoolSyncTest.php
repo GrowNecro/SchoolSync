@@ -153,7 +153,11 @@ class SchoolSyncTest extends TestCase
     public function test_client_files_and_generated_installer_are_available(): void
     {
         $clientScript = file_get_contents(base_path('tools/SchoolSync.ps1'));
-        $this->assertStringContainsString("return @('RobloxPlayerBeta', 'RobloxPlayerLauncher', 'RobloxCrashHandler', 'Windows10Universal')", $clientScript);
+        $this->assertStringContainsString("return @('RobloxPlayerBeta', 'RobloxPlayerLauncher', 'Windows10Universal')", $clientScript);
+        $this->assertStringNotContainsString("'RobloxCrashHandler'", $clientScript);
+        $this->assertStringContainsString('$script:ExamModeAvailable = $false', $clientScript);
+        $this->assertStringContainsString('$response.update_required', $clientScript);
+        $this->assertStringContainsString("RunningClientVersion = '2.0.6'", $clientScript);
         $this->assertStringContainsString('Invoke-CachedExamPolicies -DryRun:$DryRun', $clientScript);
         $this->assertStringContainsString("command.action -eq 'refresh_exam_policy'", $clientScript);
         $this->assertStringContainsString("command.action -eq 'refresh_files'", $clientScript);
@@ -162,7 +166,7 @@ class SchoolSyncTest extends TestCase
         $this->assertStringNotContainsString('$fileSyncCountdown', $clientScript);
         $this->assertStringContainsString('Server rate limit reached; pausing requests', $clientScript);
         $this->assertStringContainsString('Set-ClientSyncStateHash -RelativePath', $clientScript);
-        $this->assertSame('2.0.5', trim(file_get_contents(base_path('tools/version.txt'))));
+        $this->assertSame('2.0.6', trim(file_get_contents(base_path('tools/version.txt'))));
         $this->get('/download?client=version.txt')->assertOk()->assertSee(trim(file_get_contents(base_path('tools/version.txt'))));
         $this->get('/download?client=forbidden.php')->assertNotFound();
         $this->get('/api/client.php?file=version.txt')->assertNotFound();
@@ -332,14 +336,19 @@ class SchoolSyncTest extends TestCase
             'computer_name' => 'LAB-PC-01',
             'version' => '1.6.0',
             'interactive' => true,
-        ])->assertOk()->assertJson(['ok' => true, 'active_for_seconds' => 180]);
+        ])->assertOk()->assertJson([
+            'ok' => true,
+            'active_for_seconds' => 180,
+            'latest_version' => '2.0.6',
+            'update_required' => true,
+        ]);
 
         $this->postJson('/client/heartbeat', [
             'installation_id' => $installationId,
             'computer_name' => 'LAB-PC-01-RENAMED',
-            'version' => '1.6.0',
+            'version' => '2.0.6',
             'interactive' => false,
-        ])->assertOk();
+        ])->assertOk()->assertJson(['latest_version' => '2.0.6', 'update_required' => false]);
 
         $this->postJson('/client/heartbeat', [
             'installation_id' => (string) Str::uuid(),
@@ -435,6 +444,7 @@ class SchoolSyncTest extends TestCase
 
     public function test_admin_can_create_multiple_targeted_schedules_with_exam_mode(): void
     {
+        config()->set('schoolsync.exam_mode_enabled', true);
         [$computer, $headers] = $this->authenticatedClient('LAB-JADWAL', 'LAB-C');
         Setting::query()->create(Setting::defaults());
         $admin = User::factory()->create();
@@ -480,6 +490,42 @@ class SchoolSyncTest extends TestCase
             'exam_enabled' => '1',
         ])->assertSessionHasNoErrors()->assertRedirect(route('schedules'));
         $this->assertTrue($schedule->fresh()->exam_enabled);
+    }
+
+    public function test_exam_mode_is_temporarily_disabled_for_admin_and_clients(): void
+    {
+        [$computer, $headers] = $this->authenticatedClient('LAB-NO-EXAM', 'LAB-D');
+        Setting::query()->create(Setting::defaults());
+        $schedule = ClassSchedule::query()->create([
+            'name' => 'Jadwal lama',
+            'schedule_day' => 'Monday',
+            'start_time' => '08:00',
+            'end_time' => '10:00',
+            'browser' => [],
+            'launcher' => [],
+            'shutdown_enabled' => false,
+            'shutdown_warning' => 10,
+            'target_type' => 'group',
+            'target_value' => ['LAB-D'],
+            'exam_enabled' => true,
+            'blocked_processes' => ['discord'],
+            'enabled' => true,
+        ]);
+
+        $this->withHeaders($headers)->getJson('/client/config?installation_id='.$computer->installation_id)
+            ->assertOk()
+            ->assertJsonPath('schedules.0.exam.enabled', false)
+            ->assertJsonPath('schedules.0.exam.blocked_processes', ['discord']);
+
+        $admin = User::factory()->create();
+        $this->actingAs($admin)->get(route('schedules'))
+            ->assertOk()
+            ->assertSee('Mode ujian nonaktif sementara')
+            ->assertDontSee('Aktifkan sekarang');
+        $this->actingAs($admin)->patch(route('schedules.exam-mode.update', $schedule), [
+            'exam_enabled' => '1',
+        ])->assertSessionHasNoErrors()->assertRedirect(route('schedules'));
+        $this->assertFalse($schedule->fresh()->exam_enabled);
     }
 
     public function test_old_settings_page_redirects_to_schedules_and_shutdown_exclusions_live_there(): void

@@ -77,6 +77,8 @@ class ClientApiController extends Controller
         });
 
         ClientComputer::query()->where('last_seen_at', '<', now()->subDays(90))->delete();
+        $latestVersion = $this->latestClientVersion();
+        $reportedVersion = (string) ($validated['version'] ?? '0.0.0');
 
         return response()->json([
             'ok' => true,
@@ -86,6 +88,8 @@ class ClientApiController extends Controller
             'pairing_status' => $computer->approved ? 'approved' : 'pending',
             'client_token' => $issuedToken,
             'new_computer' => $isNewComputer,
+            'latest_version' => $latestVersion,
+            'update_required' => version_compare($reportedVersion, $latestVersion, '<'),
         ])->header('Cache-Control', 'no-store, max-age=0');
     }
 
@@ -283,33 +287,44 @@ class ClientApiController extends Controller
 
         $schedules = ClassSchedule::query()->with('project')->where('enabled', true)->orderBy('start_time')->get()
             ->filter(fn (ClassSchedule $schedule): bool => $this->scheduleTargetsComputer($schedule, $computer))
-            ->map(fn (ClassSchedule $schedule): array => [
-                'id' => $schedule->id,
-                'name' => $schedule->name,
-                'schedule' => [
-                    'day' => $schedule->schedule_day,
-                    'start' => substr((string) $schedule->start_time, 0, 5),
-                    'end' => substr((string) $schedule->end_time, 0, 5),
-                ],
-                'project' => $schedule->project?->filename ?? '',
-                'browser' => array_values($schedule->browser ?? []),
-                'launcher' => array_values($schedule->launcher ?? []),
-                'shutdown' => [
-                    'enabled' => $schedule->shutdown_enabled,
-                    'warning' => $schedule->shutdown_warning,
-                    'excluded_computers' => array_values($values['shutdown_excluded_computers'] ?? []),
-                ],
-                'exam' => [
-                    'enabled' => $schedule->exam_enabled,
-                    'blocked_processes' => array_values(array_unique([
-                        ...($schedule->blocked_processes ?? []),
-                        ...($schedule->exam_enabled ? ['roblox'] : []),
-                    ])),
-                ],
-            ])->values();
+            ->map(function (ClassSchedule $schedule) use ($values): array {
+                $examEnabled = (bool) config('schoolsync.exam_mode_enabled', false) && $schedule->exam_enabled;
+
+                return [
+                    'id' => $schedule->id,
+                    'name' => $schedule->name,
+                    'schedule' => [
+                        'day' => $schedule->schedule_day,
+                        'start' => substr((string) $schedule->start_time, 0, 5),
+                        'end' => substr((string) $schedule->end_time, 0, 5),
+                    ],
+                    'project' => $schedule->project?->filename ?? '',
+                    'browser' => array_values($schedule->browser ?? []),
+                    'launcher' => array_values($schedule->launcher ?? []),
+                    'shutdown' => [
+                        'enabled' => $schedule->shutdown_enabled,
+                        'warning' => $schedule->shutdown_warning,
+                        'excluded_computers' => array_values($values['shutdown_excluded_computers'] ?? []),
+                    ],
+                    'exam' => [
+                        'enabled' => $examEnabled,
+                        'blocked_processes' => array_values(array_unique([
+                            ...($schedule->blocked_processes ?? []),
+                            ...($examEnabled ? ['roblox'] : []),
+                        ])),
+                    ],
+                ];
+            })->values();
         $response['schedules'] = $schedules;
 
         return response()->json($response)->header('Cache-Control', 'no-store, max-age=0');
+    }
+
+    private function latestClientVersion(): string
+    {
+        $versionPath = base_path('tools/version.txt');
+
+        return is_file($versionPath) ? trim((string) file_get_contents($versionPath)) : '0.0.0';
     }
 
     private function projectFile(string $requestedFilename): BinaryFileResponse

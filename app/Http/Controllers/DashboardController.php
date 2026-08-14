@@ -116,6 +116,12 @@ class DashboardController extends Controller
             'exam_enabled' => ['required', 'boolean'],
         ]);
         $enabled = (bool) $validated['exam_enabled'];
+        if ($enabled && ! config('schoolsync.exam_mode_enabled', false)) {
+            $schedule->update(['exam_enabled' => false]);
+            $this->queueScheduleRefresh($schedule);
+
+            return redirect()->route('schedules')->with('success', 'Mode ujian sedang dinonaktifkan sementara dan tetap dalam keadaan mati.');
+        }
         $schedule->update(['exam_enabled' => $enabled]);
         $this->queueScheduleRefresh($schedule);
 
@@ -551,7 +557,7 @@ class DashboardController extends Controller
             'shutdown_warning' => $validated['shutdown_warning'],
             'target_type' => $targetType,
             'target_value' => $targetValue,
-            'exam_enabled' => $request->boolean('exam_enabled'),
+            'exam_enabled' => (bool) config('schoolsync.exam_mode_enabled', false) && $request->boolean('exam_enabled'),
             'blocked_processes' => array_values($blocked),
             'enabled' => $request->boolean('enabled'),
         ];

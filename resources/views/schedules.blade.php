@@ -4,7 +4,7 @@
 @section('section', 'MULTI-JADWAL')
 
 @section('content')
-    <section class="page-heading"><span class="eyebrow">Otomatisasi</span><h1>Multi-jadwal kelas</h1><p>Setiap sesi dapat memiliki target, proyek, aplikasi, website, shutdown, dan aturan ujian sendiri.</p></section>
+    <section class="page-heading"><span class="eyebrow">Otomatisasi</span><h1>Multi-jadwal kelas</h1><p>Setiap sesi dapat memiliki target, proyek, aplikasi, website, dan shutdown sendiri. {{ config('schoolsync.exam_mode_enabled', false) ? 'Aturan ujian dapat diatur per jadwal.' : 'Mode ujian sedang dinonaktifkan sementara.' }}</p></section>
 
     <section class="panel">
         <div class="panel-heading"><div><span class="step">NEW</span><h2>Tambah jadwal</h2><p>Buat sesi baru untuk kelas atau kelompok komputer tertentu.</p></div></div>
@@ -41,8 +41,12 @@
             <div class="panel-heading">
                 <div><span class="step">{{ $loop->iteration }}</span><h2>{{ $schedule->name }}</h2><p>{{ $days[$schedule->schedule_day] ?? $schedule->schedule_day }} · {{ substr($schedule->start_time, 0, 5) }}—{{ substr($schedule->end_time, 0, 5) }} · {{ $schedule->enabled ? 'Aktif' : 'Nonaktif' }}</p></div>
                 <div class="schedule-heading-actions">
-                    <span class="{{ $schedule->exam_enabled ? 'warning-badge' : 'muted-badge' }}">Mode ujian {{ $schedule->exam_enabled ? 'aktif' : 'mati' }}</span>
-                    <form method="post" action="{{ route('schedules.exam-mode.update', $schedule) }}">@csrf @method('PATCH')<input type="hidden" name="exam_enabled" value="{{ $schedule->exam_enabled ? 0 : 1 }}"><button class="button compact {{ $schedule->exam_enabled ? 'secondary' : 'primary' }}" type="submit">{{ $schedule->exam_enabled ? 'Matikan sekarang' : 'Aktifkan sekarang' }}</button></form>
+                    @if (config('schoolsync.exam_mode_enabled', false))
+                        <span class="{{ $schedule->exam_enabled ? 'warning-badge' : 'muted-badge' }}">Mode ujian {{ $schedule->exam_enabled ? 'aktif' : 'mati' }}</span>
+                        <form method="post" action="{{ route('schedules.exam-mode.update', $schedule) }}">@csrf @method('PATCH')<input type="hidden" name="exam_enabled" value="{{ $schedule->exam_enabled ? 0 : 1 }}"><button class="button compact {{ $schedule->exam_enabled ? 'secondary' : 'primary' }}" type="submit">{{ $schedule->exam_enabled ? 'Matikan sekarang' : 'Aktifkan sekarang' }}</button></form>
+                    @else
+                        <span class="muted-badge">Mode ujian nonaktif sementara</span>
+                    @endif
                 </div>
             </div>
             <details><summary>Edit jadwal</summary>@include('partials.schedule-form', ['schedule' => $schedule])</details>

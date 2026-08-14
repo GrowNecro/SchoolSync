@@ -25,8 +25,12 @@
         <label>Peringatan shutdown<input type="number" name="shutdown_warning" min="1" max="120" value="{{ $isEdit ? $schedule->shutdown_warning : 10 }}" required></label>
     </div>
     <div class="exam-box">
-        <label class="switch-label"><input type="checkbox" name="exam_enabled" value="1" @checked($isEdit && $schedule->exam_enabled)><span class="switch"></span><span><b>Mode ujian</b><small>Setiap Roblox Player yang dijalankan terdeteksi dan ditutup otomatis; mode dapat diubah saat jadwal berjalan.</small></span></label>
-        <label>Nama proses tambahan yang diblokir <span class="hint">Satu per baris, tanpa .exe juga boleh</span><textarea name="blocked_processes" rows="3" placeholder="discord&#10;steam&#10;chrome">{{ $isEdit ? implode("\n", $schedule->blocked_processes ?? []) : '' }}</textarea></label>
+        @if (config('schoolsync.exam_mode_enabled', false))
+            <label class="switch-label"><input type="checkbox" name="exam_enabled" value="1" @checked($isEdit && $schedule->exam_enabled)><span class="switch"></span><span><b>Mode ujian</b><small>Setiap Roblox Player yang dijalankan terdeteksi dan ditutup otomatis; mode dapat diubah saat jadwal berjalan.</small></span></label>
+            <label>Nama proses tambahan yang diblokir <span class="hint">Satu per baris, tanpa .exe juga boleh</span><textarea name="blocked_processes" rows="3" placeholder="discord&#10;steam&#10;chrome">{{ $isEdit ? implode("\n", $schedule->blocked_processes ?? []) : '' }}</textarea></label>
+        @else
+            <span class="switch-label"><span><b>Mode ujian dinonaktifkan sementara</b><small>Klien tidak akan menutup Roblox Player atau aplikasi lain sampai fitur ini diaktifkan kembali setelah perbaikan.</small></span></span>
+        @endif
     </div>
     <button class="button primary" type="submit">{{ $isEdit ? 'Simpan jadwal' : 'Tambahkan jadwal' }}</button>
 </form>

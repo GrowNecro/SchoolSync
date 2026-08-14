@@ -30,6 +30,8 @@ $script:ClientFileWatcher = $null
 $script:ClientFileEventSources = @()
 $script:ClientFileRetryPaths = @{}
 $script:ResourceSyncRetryAt = [datetime]::MaxValue
+$script:ExamModeAvailable = $false
+$script:RunningClientVersion = '2.0.6'
 
 function Write-Log {
     param([string]$Message)
@@ -313,21 +315,27 @@ function Invoke-SelfUpdate {
     }
     if (Test-ServerBackoff) { return $false }
 
-    $localVersion = if (Test-Path -Path $script:VersionPath) { (Get-Content -Path $script:VersionPath -Raw).Trim() } else { '0.0.0' }
+    $installedVersion = if (Test-Path -Path $script:VersionPath) { (Get-Content -Path $script:VersionPath -Raw).Trim() } else { '0.0.0' }
+    $runningVersion = $script:RunningClientVersion
     $remoteVersionUri = "$($ServerUrl.TrimEnd('/'))/download?client=version.txt"
     $tempDir = $null
 
     try {
         $remoteVersion = (Invoke-RestMethod -Uri $remoteVersionUri -Method Get).Trim()
 
-        if ($remoteVersion -eq $localVersion) {
+        if ($remoteVersion -eq $runningVersion) {
             if (-not $QuietWhenCurrent) {
-                Write-Log "Version $localVersion is current"
+                Write-Log "Version $runningVersion is current"
             }
             return $false
         }
 
-        Write-Log "Updating from version $localVersion to $remoteVersion"
+        if ($remoteVersion -eq $installedVersion) {
+            Write-Log "Restarting process $runningVersion to apply installed version $installedVersion"
+            return $true
+        }
+
+        Write-Log "Updating from version $runningVersion to $remoteVersion"
         $tempDir = Join-Path $script:DownloadsDir ("update-" + [guid]::NewGuid().ToString())
         Ensure-Directory $tempDir
 
@@ -390,7 +398,7 @@ function Invoke-Heartbeat {
             return
         }
 
-        $clientVersion = if (Test-Path -LiteralPath $script:VersionPath) { (Get-Content -LiteralPath $script:VersionPath -Raw).Trim() } else { '0.0.0' }
+        $clientVersion = $script:RunningClientVersion
         $computerName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [Environment]::MachineName }
         $payload = @{
             installation_id = $script:InstallationId
@@ -408,6 +416,12 @@ function Invoke-Heartbeat {
         }
         if ([string]$response.pairing_status -eq 'pending') {
             Write-Log 'Computer is waiting for administrator approval'
+        }
+        if ([bool]$response.update_required) {
+            Write-Log "Server requires client version $([string]$response.latest_version); updating immediately"
+            if (Invoke-SelfUpdate -ServerUrl $ServerUrl -QuietWhenCurrent) {
+                $script:RestartRequested = $true
+            }
         }
     } catch {
         Register-ServerFailure -Failure $_ | Out-Null
@@ -1016,6 +1030,7 @@ function Start-ClientListener {
         $heartbeatCountdown--
         if ($heartbeatCountdown -le 0) {
             Invoke-Heartbeat -ServerUrl $ServerUrl
+            if ($script:RestartRequested) { return }
             $heartbeatCountdown = 24
         }
         Invoke-PendingClientFileSync -ServerUrl $ServerUrl
@@ -1056,6 +1071,7 @@ function Start-HeartbeatListener {
         $heartbeatCountdown--
         if ($heartbeatCountdown -le 0) {
             Invoke-Heartbeat -ServerUrl $ServerUrl
+            if ($script:RestartRequested) { return }
             $heartbeatCountdown = 60
         }
         $updateCountdown--
@@ -1196,7 +1212,7 @@ function Resolve-ExamProcessNames {
 
     $normalized = ([IO.Path]::GetFileNameWithoutExtension($ConfiguredName)).ToLowerInvariant()
     if ($normalized -eq 'roblox') {
-        return @('RobloxPlayerBeta', 'RobloxPlayerLauncher', 'RobloxCrashHandler', 'Windows10Universal')
+        return @('RobloxPlayerBeta', 'RobloxPlayerLauncher', 'Windows10Universal')
     }
 
     return @($normalized)
@@ -1208,7 +1224,7 @@ function Invoke-ExamMode {
         [switch]$DryRun
     )
 
-    if (-not $Config.exam -or -not [bool]$Config.exam.enabled) { return }
+    if (-not $script:ExamModeAvailable -or -not $Config.exam -or -not [bool]$Config.exam.enabled) { return }
     $protected = @('schoolsync', 'powershell', 'pwsh', 'winlogon', 'lsass', 'csrss', 'services', 'svchost', 'system', 'explorer')
     foreach ($processName in @($Config.exam.blocked_processes)) {
         $normalized = ([IO.Path]::GetFileNameWithoutExtension([string]$processName)).ToLowerInvariant()
@@ -1384,6 +1400,7 @@ function Invoke-AutoShutdown {
         $heartbeatCountdown--
         if ($heartbeatCountdown -le 0) {
             Invoke-Heartbeat -ServerUrl $ServerUrl
+            if ($script:RestartRequested) { return }
             $heartbeatCountdown = 12
         }
         Invoke-PendingClientFileSync -ServerUrl $ServerUrl
@@ -1441,6 +1458,7 @@ try {
         Write-Log "Using control panel at $ServerUrl"
     }
     Invoke-Heartbeat -ServerUrl $ServerUrl
+    if ($script:RestartRequested) { return }
     if ($HeartbeatOnly) {
         if (Invoke-SelfUpdate -ServerUrl $ServerUrl) {
             $script:RestartRequested = $true
@@ -1461,6 +1479,7 @@ try {
                 return
             }
             Invoke-Heartbeat -ServerUrl $ServerUrl
+            if ($script:RestartRequested) { return }
             if ($DryRun) { throw }
             Start-Sleep -Seconds 15
         }
@@ -1473,6 +1492,7 @@ try {
     Invoke-ClientFileSync -ServerUrl $ServerUrl
     Start-ClientFileWatcher
     Invoke-Heartbeat -ServerUrl $ServerUrl
+    if ($script:RestartRequested) { return }
 
     $hasMultiSchedule = $config.PSObject.Properties.Name -contains 'schedules'
     $sessionConfigs = if ($hasMultiSchedule) { @($config.schedules) } else { @($config) }
@@ -1534,6 +1554,7 @@ try {
                 $heartbeatCountdown--
                 if ($heartbeatCountdown -le 0) {
                     Invoke-Heartbeat -ServerUrl $ServerUrl
+                    if ($script:RestartRequested) { return }
                     $heartbeatCountdown = 12
                 }
                 Invoke-PendingClientFileSync -ServerUrl $ServerUrl
