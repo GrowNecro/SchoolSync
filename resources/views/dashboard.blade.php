@@ -21,7 +21,7 @@
     </section>
 
     <section class="panel" data-computer-status data-status-url="{{ route('status.computers') }}">
-        <div class="panel-heading"><div><span class="step">PC</span><h2>Komputer terhubung</h2><p>Status diperbarui otomatis. Komputer dinyatakan offline setelah 90 detik tanpa heartbeat.</p></div><span class="live-indicator"><i></i> Langsung</span></div>
+        <div class="panel-heading"><div><span class="step">PC</span><h2>Komputer terhubung</h2><p>Status diperbarui otomatis setiap menit. Komputer dinyatakan offline setelah 3 menit tanpa heartbeat.</p></div><span class="live-indicator"><i></i> Hemat server</span></div>
         <div class="computer-list" data-computer-list>
             @forelse ($computers as $computer)
                 <article>

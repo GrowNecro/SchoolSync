@@ -10,7 +10,7 @@
         @forelse ($computers as $computer)
             @php($inventory = $computer->inventory ?? [])
             <section class="panel device-card {{ $computer->approved ? '' : 'pending-device' }}">
-                <div class="panel-heading"><div><span class="computer-dot {{ $computer->last_seen_at?->gte(now()->subSeconds(90)) ? 'online' : '' }}"></span><h2>{{ $computer->computer_name }}</h2><p>{{ $computer->approved ? 'Disetujui' : 'Menunggu persetujuan' }} · Klien {{ $computer->version ?: '-' }}</p></div><span class="{{ $computer->approved ? 'active-badge' : 'warning-badge' }}">{{ $computer->approved ? 'Aktif' : 'Pairing' }}</span></div>
+                <div class="panel-heading"><div><span class="computer-dot {{ $computer->last_seen_at?->gte(now()->subSeconds(180)) ? 'online' : '' }}"></span><h2>{{ $computer->computer_name }}</h2><p>{{ $computer->approved ? 'Disetujui' : 'Menunggu persetujuan' }} · Klien {{ $computer->version ?: '-' }}</p></div><span class="{{ $computer->approved ? 'active-badge' : 'warning-badge' }}">{{ $computer->approved ? 'Aktif' : 'Pairing' }}</span></div>
                 <dl class="inventory-list">
                     <div><dt>Sistem</dt><dd>{{ $inventory['os'] ?? 'Belum dilaporkan' }}</dd></div>
                     <div><dt>RAM</dt><dd>{{ isset($inventory['ram_gb']) ? $inventory['ram_gb'].' GB' : '-' }}</dd></div>

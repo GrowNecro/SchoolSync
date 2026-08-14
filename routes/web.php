@@ -9,7 +9,7 @@ Route::get('/login', [AuthController::class, 'create'])->name('login');
 Route::post('/login', [AuthController::class, 'store'])->middleware('throttle:10,1')->name('login.store');
 Route::post('/logout', [AuthController::class, 'destroy'])->middleware('auth')->name('logout');
 
-Route::get('/download', [ClientApiController::class, 'download'])->middleware('throttle:120,1')->name('download');
+Route::get('/download', [ClientApiController::class, 'download'])->middleware('throttle:300,1')->name('download');
 Route::get('/installer', [ClientApiController::class, 'installer'])->middleware('throttle:30,1')->name('installer');
 
 Route::middleware('auth')->group(function (): void {
@@ -41,19 +41,19 @@ Route::middleware('auth')->group(function (): void {
     Route::put('/password', [DashboardController::class, 'updatePassword'])->name('password.update');
 });
 
-Route::prefix('client')->middleware('throttle:6000,1')->group(function (): void {
+Route::prefix('client')->middleware('throttle:2000,1')->group(function (): void {
     Route::get('/config', [ClientApiController::class, 'config'])->name('client.config');
     Route::get('/files', [ClientApiController::class, 'files'])->name('client.files');
     Route::get('/commands', [ClientApiController::class, 'commands'])->name('client.commands');
 });
 Route::post('/client/heartbeat', [ClientApiController::class, 'heartbeat'])
-    ->middleware('throttle:6000,1')
+    ->middleware('throttle:2000,1')
     ->name('client.heartbeat');
 Route::post('/client/files/upload', [ClientApiController::class, 'uploadFile'])
-    ->middleware('throttle:240,1')
+    ->middleware('throttle:500,1')
     ->name('client.files.upload');
 Route::post('/client/commands/acknowledge', [ClientApiController::class, 'acknowledgeCommand'])
-    ->middleware('throttle:6000,1')
+    ->middleware('throttle:2000,1')
     ->name('client.commands.acknowledge');
 Route::get('/client/file-versions/{clientFileVersion}/download', [ClientApiController::class, 'downloadClientFileVersion'])
     ->middleware('throttle:240,1')

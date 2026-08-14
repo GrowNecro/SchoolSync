@@ -69,5 +69,5 @@ if (computerStatus) {
     };
 
     refreshComputerStatus();
-    setInterval(refreshComputerStatus, 10000);
+    setInterval(refreshComputerStatus, 60000);
 }

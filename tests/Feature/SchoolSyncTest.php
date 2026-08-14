@@ -152,7 +152,10 @@ class SchoolSyncTest extends TestCase
         $clientScript = file_get_contents(base_path('tools/SchoolSync.ps1'));
         $this->assertStringContainsString("return @('RobloxPlayerBeta', 'RobloxPlayerLauncher', 'RobloxCrashHandler', 'Windows10Universal')", $clientScript);
         $this->assertStringContainsString('Invoke-CachedExamPolicies -DryRun:$DryRun', $clientScript);
-        $this->assertSame('2.0.3', trim(file_get_contents(base_path('tools/version.txt'))));
+        $this->assertStringContainsString("command.action -eq 'refresh_exam_policy'", $clientScript);
+        $this->assertStringContainsString('Server rate limit reached; pausing requests', $clientScript);
+        $this->assertStringContainsString('Set-ClientSyncStateHash -RelativePath', $clientScript);
+        $this->assertSame('2.0.4', trim(file_get_contents(base_path('tools/version.txt'))));
         $this->get('/download?client=version.txt')->assertOk()->assertSee(trim(file_get_contents(base_path('tools/version.txt'))));
         $this->get('/download?client=forbidden.php')->assertNotFound();
         $this->get('/api/client.php?file=version.txt')->assertNotFound();
@@ -322,7 +325,7 @@ class SchoolSyncTest extends TestCase
             'computer_name' => 'LAB-PC-01',
             'version' => '1.6.0',
             'interactive' => true,
-        ])->assertOk()->assertJson(['ok' => true, 'active_for_seconds' => 90]);
+        ])->assertOk()->assertJson(['ok' => true, 'active_for_seconds' => 180]);
 
         $this->postJson('/client/heartbeat', [
             'installation_id' => $installationId,
@@ -445,6 +448,10 @@ class SchoolSyncTest extends TestCase
 
         $schedule = ClassSchedule::query()->firstOrFail();
         $this->assertSame(['discord', 'steam'], $schedule->blocked_processes);
+        $this->assertDatabaseHas('remote_commands', [
+            'action' => 'refresh_exam_policy',
+            'target_type' => 'group',
+        ]);
         $this->withHeaders($headers)->getJson('/client/config?installation_id='.$computer->installation_id)
             ->assertOk()
             ->assertJsonFragment([
@@ -456,6 +463,7 @@ class SchoolSyncTest extends TestCase
             'exam_enabled' => '0',
         ])->assertSessionHasNoErrors()->assertRedirect(route('schedules'));
         $this->assertFalse($schedule->fresh()->exam_enabled);
+        $this->assertSame(2, \App\Models\RemoteCommand::query()->where('action', 'refresh_exam_policy')->count());
         $this->withHeaders($headers)->getJson('/client/config?installation_id='.$computer->installation_id)
             ->assertOk()
             ->assertJsonPath('schedules.0.exam.enabled', false)

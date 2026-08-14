@@ -17,6 +17,14 @@ fail() {
     exit 1
 }
 
+run_low_priority() {
+    if command -v nice >/dev/null 2>&1; then
+        nice -n 10 "$@"
+    else
+        "$@"
+    fi
+}
+
 validate_build() {
     BUILD_ROOT="$1" php -r '$root=getenv("BUILD_ROOT");$manifestFile=$root."/manifest.json";if(!is_file($manifestFile)){fwrite(STDERR,"Manifest Vite tidak ditemukan: ".$manifestFile.PHP_EOL);exit(1);}$manifest=json_decode(file_get_contents($manifestFile),true,512,JSON_THROW_ON_ERROR);$assets=[];foreach($manifest as$entry){if(isset($entry["file"]))$assets[]=$entry["file"];foreach($entry["css"]??[]as$css)$assets[]=$css;}foreach(array_unique($assets)as$asset){if(!is_file($root."/".$asset)){fwrite(STDERR,"Aset build tidak ditemukan: ".$asset.PHP_EOL);exit(1);}}'
 }
@@ -84,26 +92,35 @@ else
     fail "Composer tidak ditemukan."
 fi
 
-printf '%s\n' 'Memasang dependency PHP production...'
-"${composer_command[@]}" install \
-    --no-dev \
-    --prefer-dist \
-    --optimize-autoloader \
-    --no-interaction \
-    --no-progress \
-    --no-scripts
+composer_marker="$application_root/storage/app/.composer-lock.sha256"
+composer_lock_hash="$(php -r 'echo hash_file("sha256", "composer.lock");')"
+installed_lock_hash="$(tr -d '[:space:]' < "$composer_marker" 2>/dev/null || true)"
+if [[ ! -f vendor/autoload.php || "$installed_lock_hash" != "$composer_lock_hash" ]]; then
+    printf '%s\n' 'Memasang dependency PHP production dengan prioritas rendah...'
+    run_low_priority "${composer_command[@]}" install \
+        --no-dev \
+        --prefer-dist \
+        --optimize-autoloader \
+        --no-interaction \
+        --no-progress \
+        --no-scripts
+    mkdir -p "$(dirname "$composer_marker")"
+    printf '%s\n' "$composer_lock_hash" > "$composer_marker"
+else
+    printf '%s\n' 'composer.lock tidak berubah; instalasi dependency dilewati untuk menghemat resource hosting.'
+fi
 
 if ! grep -Eq '^APP_KEY=.+' .env; then
     printf '%s\n' 'Membuat APP_KEY untuk instalasi pertama...'
-    php artisan key:generate --force
+    run_low_priority php artisan key:generate --force
 fi
 
 printf '%s\n' 'Menyiapkan Laravel dan database MySQL...'
-php artisan config:clear
-php artisan package:discover
-php artisan migrate --force
-php artisan db:seed --class=DatabaseSeeder --force
-php artisan optimize:clear
+run_low_priority php artisan config:clear
+run_low_priority php artisan package:discover
+run_low_priority php artisan migrate --force
+run_low_priority php artisan db:seed --class=DatabaseSeeder --force
+run_low_priority php artisan optimize:clear
 
 EXPECTED_PUBLIC_FILES_ROOT="$public_root/storage" php -r 'require "vendor/autoload.php";$app=require "bootstrap/app.php";$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();$expected=realpath(getenv("EXPECTED_PUBLIC_FILES_ROOT"));$configured=realpath(config("filesystems.disks.public.root"));if($expected===false||$configured===false||$expected!==$configured){fwrite(STDERR,"Disk public Laravel tidak menunjuk ke document root/storage.".PHP_EOL);fwrite(STDERR,"Expected: ".getenv("EXPECTED_PUBLIC_FILES_ROOT").PHP_EOL);fwrite(STDERR,"Configured: ".config("filesystems.disks.public.root").PHP_EOL);exit(1);}'
 
@@ -139,9 +156,9 @@ APP_ROOT="$application_root" FRONT_TEMPLATE="$front_template" FRONT_OUTPUT="$pub
 mv "$public_root/index.php.new" "$public_root/index.php"
 php -l "$public_root/index.php"
 
-php artisan config:cache
-php artisan route:cache
-php artisan view:cache
+run_low_priority php artisan config:cache
+run_low_priority php artisan route:cache
+run_low_priority php artisan view:cache
 
 validate_build "$public_root/build"
 

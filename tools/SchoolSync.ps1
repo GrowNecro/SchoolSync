@@ -25,6 +25,7 @@ $script:HeartbeatLockPath = Join-Path $script:RootDir '.heartbeat.lock'
 $script:LogPath = Join-Path $script:LogsDir 'schoolsync.log'
 $script:InventoryCache = $null
 $script:ActiveExamConfigs = @()
+$script:ServerBackoffUntil = [datetime]::MinValue
 
 function Write-Log {
     param([string]$Message)
@@ -46,6 +47,58 @@ function Get-DateTimeFromTimeString {
 
     $parsed = [DateTime]::ParseExact($TimeText, 'HH:mm', [System.Globalization.CultureInfo]::InvariantCulture)
     return [DateTime]::new((Get-Date).Year, (Get-Date).Month, (Get-Date).Day, $parsed.Hour, $parsed.Minute, 0)
+}
+
+function Test-ServerBackoff {
+    return (Get-Date) -lt $script:ServerBackoffUntil
+}
+
+function Register-ServerFailure {
+    param([object]$Failure)
+
+    $message = [string]$Failure.Exception.Message
+    $statusCode = 0
+    try {
+        if ($Failure.Exception.Response -and $Failure.Exception.Response.StatusCode) {
+            $statusCode = [int]$Failure.Exception.Response.StatusCode
+        }
+    } catch {}
+
+    if ($statusCode -eq 429 -or $message -match '(?i)429|Too Many Requests') {
+        $delaySeconds = 120 + (Get-Random -Minimum 0 -Maximum 121)
+        $nextAttempt = (Get-Date).AddSeconds($delaySeconds)
+        if ($nextAttempt -gt $script:ServerBackoffUntil) {
+            $script:ServerBackoffUntil = $nextAttempt
+            Write-Log "Server rate limit reached; pausing requests for $delaySeconds seconds"
+        }
+        return $true
+    }
+
+    return $false
+}
+
+function Set-ClientSyncStateHash {
+    param(
+        [string]$RelativePath,
+        [string]$Hash
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or [string]::IsNullOrWhiteSpace($Hash)) { return }
+
+    $syncState = @{}
+    if (Test-Path -LiteralPath $script:ClientSyncStatePath -PathType Leaf) {
+        try {
+            $savedState = Get-Content -LiteralPath $script:ClientSyncStatePath -Raw | ConvertFrom-Json
+            foreach ($property in $savedState.PSObject.Properties) {
+                $syncState[[string]$property.Name] = [string]$property.Value
+            }
+        } catch {
+            Write-Log "Invalid client sync state while recording a server file: $($_.Exception.Message)"
+        }
+    }
+
+    $syncState[$RelativePath.Replace('\', '/')] = $Hash.ToLowerInvariant()
+    $syncState | ConvertTo-Json | Set-Content -LiteralPath $script:ClientSyncStatePath -Encoding UTF8
 }
 
 function Get-ControlServerUrl {
@@ -125,7 +178,11 @@ function Get-Config {
         [switch]$Quiet
     )
 
-    if ($ServerUrl) {
+    if ($ServerUrl -and (Test-ServerBackoff) -and $RemoteOnly) {
+        throw 'Server requests are temporarily paused after HTTP 429.'
+    }
+
+    if ($ServerUrl -and -not (Test-ServerBackoff)) {
         try {
             $remoteUri = "$($ServerUrl.TrimEnd('/'))/client/config"
             $remoteUri = Add-ClientIdentityToUri -Uri $remoteUri
@@ -133,6 +190,7 @@ function Get-Config {
             if (-not $Quiet) { Write-Log "Loaded control panel config from $remoteUri" }
             return $config
         } catch {
+            Register-ServerFailure -Failure $_ | Out-Null
             Write-Log "Control panel config unavailable: $($_.Exception.Message)"
             if ($RemoteOnly) { throw }
         }
@@ -162,6 +220,7 @@ function Invoke-SelfUpdate {
         Write-Log 'No control panel URL configured; self-update skipped'
         return $false
     }
+    if (Test-ServerBackoff) { return $false }
 
     $localVersion = if (Test-Path -Path $script:VersionPath) { (Get-Content -Path $script:VersionPath -Raw).Trim() } else { '0.0.0' }
     $remoteVersionUri = "$($ServerUrl.TrimEnd('/'))/download?client=version.txt"
@@ -193,6 +252,7 @@ function Invoke-SelfUpdate {
         Write-Log "Application updated from control panel to version $remoteVersion"
         return $true
     } catch {
+        Register-ServerFailure -Failure $_ | Out-Null
         Write-Log "Self-update failed: $($_.Exception.Message)"
         return $false
     } finally {
@@ -224,7 +284,7 @@ function Get-InstallationId {
 function Invoke-Heartbeat {
     param([string]$ServerUrl)
 
-    if (-not $ServerUrl -or -not $script:InstallationId) { return }
+    if (-not $ServerUrl -or -not $script:InstallationId -or (Test-ServerBackoff)) { return }
 
     $heartbeatLock = $null
     try {
@@ -259,6 +319,7 @@ function Invoke-Heartbeat {
             Write-Log 'Computer is waiting for administrator approval'
         }
     } catch {
+        Register-ServerFailure -Failure $_ | Out-Null
         Write-Log "Heartbeat failed: $($_.Exception.Message)"
     } finally {
         if ($heartbeatLock) { $heartbeatLock.Dispose() }
@@ -369,12 +430,14 @@ function Invoke-ResourceSync {
         Write-Log 'No control panel URL configured; file sync skipped'
         return
     }
+    if (Test-ServerBackoff) { return }
 
     Ensure-Directory $script:DownloadsDir
     $manifestUri = Add-ClientIdentityToUri -Uri "$($ServerUrl.TrimEnd('/'))/client/files"
     try {
         $manifest = Invoke-RestMethod -Uri $manifestUri -Method Get -Headers (Get-ClientHeaders)
     } catch {
+        Register-ServerFailure -Failure $_ | Out-Null
         Write-Log "File manifest unavailable: $($_.Exception.Message)"
         return
     }
@@ -433,7 +496,7 @@ function Invoke-ResourceSync {
 function Invoke-ClientFileSync {
     param([string]$ServerUrl)
 
-    if (-not $ServerUrl -or -not $script:InstallationId) { return }
+    if (-not $ServerUrl -or -not $script:InstallationId -or (Test-ServerBackoff)) { return }
 
     Ensure-Directory $script:ProjectsDir
     Add-Type -AssemblyName System.Net.Http
@@ -504,6 +567,7 @@ function Invoke-ClientFileSync {
             $changed = $true
             Write-Log "Uploaded client file: $relativePath"
         } catch {
+            Register-ServerFailure -Failure $_ | Out-Null
             Write-Log "Client file upload failed for $($file.FullName): $($_.Exception.Message)"
         }
     }
@@ -533,14 +597,25 @@ function Invoke-ProjectUpdate {
     }
 
     if ($ServerUrl) {
+        Ensure-Directory $script:DownloadsDir
+        $tempPath = Join-Path $script:DownloadsDir ('.project-' + [guid]::NewGuid().ToString('N') + '.tmp')
         try {
             $projectName = [uri]::EscapeDataString([string]$Config.project)
             $projectUri = Add-ClientIdentityToUri -Uri "$($ServerUrl.TrimEnd('/'))/download?file=$projectName"
-            Invoke-WebRequest -Uri $projectUri -OutFile $targetPath -UseBasicParsing -Headers (Get-ClientHeaders)
+            Invoke-WebRequest -Uri $projectUri -OutFile $tempPath -UseBasicParsing -Headers (Get-ClientHeaders)
+            $downloadedHash = (Get-FileHash -LiteralPath $tempPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            Move-Item -LiteralPath $tempPath -Destination $targetPath -Force
+            $tempPath = $null
+            Set-ClientSyncStateHash -RelativePath ([string]$Config.project) -Hash $downloadedHash
             Write-Log "Downloaded project $($Config.project) from control panel"
             return
         } catch {
+            Register-ServerFailure -Failure $_ | Out-Null
             Write-Log "Control panel project update failed: $($_.Exception.Message)"
+        } finally {
+            if ($tempPath -and (Test-Path -LiteralPath $tempPath)) {
+                Remove-Item -LiteralPath $tempPath -Force
+            }
         }
     }
 
@@ -559,6 +634,8 @@ function Send-CommandAcknowledgement {
         [string]$Message
     )
 
+    if (Test-ServerBackoff) { return }
+
     try {
         $payload = @{
             installation_id = $script:InstallationId
@@ -569,6 +646,7 @@ function Send-CommandAcknowledgement {
         $ackUri = "$($ServerUrl.TrimEnd('/'))/client/commands/acknowledge"
         Invoke-RestMethod -Uri $ackUri -Method Post -ContentType 'application/json' -Body $payload -Headers (Get-ClientHeaders) | Out-Null
     } catch {
+        Register-ServerFailure -Failure $_ | Out-Null
         Write-Log "Command acknowledgement failed for ${CommandId}: $($_.Exception.Message)"
     }
 }
@@ -617,6 +695,7 @@ function Restore-ClientFileVersion {
             throw "Checksum versi yang dipulihkan tidak sesuai untuk $RelativePath"
         }
         Move-Item -LiteralPath $tempPath -Destination $targetPath -Force
+        Set-ClientSyncStateHash -RelativePath $RelativePath -Hash $actualHash
         Write-Log "Restored client file version: $RelativePath"
     } finally {
         if (Test-Path -LiteralPath $tempPath) {
@@ -628,7 +707,7 @@ function Restore-ClientFileVersion {
 function Invoke-RemoteCommands {
     param([string]$ServerUrl)
 
-    if (-not $ServerUrl) { return }
+    if (-not $ServerUrl -or (Test-ServerBackoff)) { return }
 
     $lastId = 0
     if (Test-Path -LiteralPath $script:CommandStatePath -PathType Leaf) {
@@ -711,6 +790,9 @@ function Invoke-RemoteCommands {
                         continue
                     }
                     Restore-ClientFileVersion -ServerUrl $ServerUrl -VersionId ([int64]$command.payload.version_id) -RelativePath ([string]$command.payload.relative_path) -ExpectedHash ([string]$command.payload.sha256)
+                } elseif ([string]$command.action -eq 'refresh_exam_policy') {
+                    Invoke-ActiveExamPolicies -ServerUrl $ServerUrl -DryRun:$script:DryRunMode
+                    $executionMessage = 'Kebijakan mode ujian diperbarui.'
                 } else {
                     $executionStatus = 'skipped'
                     $executionMessage = "Perintah tidak didukung: $($command.action)"
@@ -734,6 +816,7 @@ function Invoke-RemoteCommands {
             @{ last_id = $newLastId } | ConvertTo-Json | Set-Content -LiteralPath $script:CommandStatePath -Encoding UTF8
         }
     } catch {
+        Register-ServerFailure -Failure $_ | Out-Null
         Write-Log "Remote command check failed: $($_.Exception.Message)"
     }
 }
@@ -750,37 +833,42 @@ function Start-ClientListener {
     }
 
     Write-Log 'Background command listener started'
-    $fileSyncCountdown = 12
-    $heartbeatCountdown = 6
-    $updateCountdown = 12
+    $fileSyncCountdown = 120
+    $heartbeatCountdown = 24
+    $updateCountdown = 120
     $examPolicyCountdown = 1
+    $commandCountdown = 1
     do {
         $examPolicyCountdown--
         if ($examPolicyCountdown -le 0) {
             Invoke-ActiveExamPolicies -ServerUrl $ServerUrl -DryRun:$DryRun
-            $examPolicyCountdown = 2
+            $examPolicyCountdown = 24
         }
         Invoke-CachedExamPolicies -DryRun:$DryRun
-        Invoke-RemoteCommands -ServerUrl $ServerUrl
+        $commandCountdown--
+        if ($commandCountdown -le 0) {
+            Invoke-RemoteCommands -ServerUrl $ServerUrl
+            $commandCountdown = 4
+        }
         $updateCountdown--
         if ($updateCountdown -le 0) {
             if (Invoke-SelfUpdate -ServerUrl $ServerUrl -QuietWhenCurrent) {
                 $script:RestartRequested = $true
                 return
             }
-            $updateCountdown = 12
+            $updateCountdown = 120
         }
         $heartbeatCountdown--
         if ($heartbeatCountdown -le 0) {
             Invoke-Heartbeat -ServerUrl $ServerUrl
-            $heartbeatCountdown = 6
+            $heartbeatCountdown = 24
         }
         $fileSyncCountdown--
         if ($fileSyncCountdown -le 0) {
             Invoke-ResourceSync -ServerUrl $ServerUrl
             Invoke-ClientFileSync -ServerUrl $ServerUrl
             Invoke-Heartbeat -ServerUrl $ServerUrl
-            $fileSyncCountdown = 12
+            $fileSyncCountdown = 120
         }
         if ($DryRun) { return }
         Start-Sleep -Seconds 5
@@ -801,24 +889,24 @@ function Start-HeartbeatListener {
     Write-Log 'Startup heartbeat listener started'
     $examPolicyCountdown = 1
     $commandCountdown = 1
-    $heartbeatCountdown = 1
-    $updateCountdown = 1
+    $heartbeatCountdown = 60
+    $updateCountdown = 600
     do {
         $examPolicyCountdown--
         if ($examPolicyCountdown -le 0) {
             Invoke-ActiveExamPolicies -ServerUrl $ServerUrl -DryRun:$DryRun
-            $examPolicyCountdown = 10
+            $examPolicyCountdown = 120
         }
         Invoke-CachedExamPolicies -DryRun:$DryRun
         $commandCountdown--
         if ($commandCountdown -le 0) {
             Invoke-RemoteCommands -ServerUrl $ServerUrl
-            $commandCountdown = 10
+            $commandCountdown = 20
         }
         $heartbeatCountdown--
         if ($heartbeatCountdown -le 0) {
             Invoke-Heartbeat -ServerUrl $ServerUrl
-            $heartbeatCountdown = 30
+            $heartbeatCountdown = 60
         }
         $updateCountdown--
         if ($updateCountdown -le 0) {
@@ -826,7 +914,7 @@ function Start-HeartbeatListener {
                 $script:RestartRequested = $true
                 return
             }
-            $updateCountdown = 60
+            $updateCountdown = 600
         }
         if ($DryRun) { return }
         Start-Sleep -Seconds 1
@@ -1098,10 +1186,11 @@ function Invoke-AutoShutdown {
     }
 
     $warningTriggered = $false
-    $fileSyncCountdown = 6
-    $heartbeatCountdown = 3
-    $updateCountdown = 6
-    $configRefreshCountdown = 1
+    $fileSyncCountdown = 60
+    $heartbeatCountdown = 12
+    $updateCountdown = 60
+    $configRefreshCountdown = 12
+    $commandCountdown = 1
     $examWasEnabled = [bool]($Config.exam -and $Config.exam.enabled)
 
     while ((Get-Date) -lt $EndTime) {
@@ -1125,30 +1214,34 @@ function Invoke-AutoShutdown {
             } catch {
                 Write-Log "Active schedule refresh failed; keeping the last valid config: $($_.Exception.Message)"
             }
-            $configRefreshCountdown = 1
+            $configRefreshCountdown = 12
         }
 
         Invoke-ExamMode -Config $Config -DryRun:$DryRun
-        Invoke-RemoteCommands -ServerUrl $ServerUrl
+        $commandCountdown--
+        if ($commandCountdown -le 0) {
+            Invoke-RemoteCommands -ServerUrl $ServerUrl
+            $commandCountdown = 2
+        }
         $updateCountdown--
         if ($updateCountdown -le 0) {
             if (Invoke-SelfUpdate -ServerUrl $ServerUrl -QuietWhenCurrent) {
                 $script:RestartRequested = $true
                 return
             }
-            $updateCountdown = 6
+            $updateCountdown = 60
         }
         $heartbeatCountdown--
         if ($heartbeatCountdown -le 0) {
             Invoke-Heartbeat -ServerUrl $ServerUrl
-            $heartbeatCountdown = 3
+            $heartbeatCountdown = 12
         }
         $fileSyncCountdown--
         if ($fileSyncCountdown -le 0) {
             Invoke-ResourceSync -ServerUrl $ServerUrl
             Invoke-ClientFileSync -ServerUrl $ServerUrl
             Invoke-Heartbeat -ServerUrl $ServerUrl
-            $fileSyncCountdown = 6
+            $fileSyncCountdown = 60
         }
         $remaining = [Math]::Ceiling(($EndTime - (Get-Date)).TotalMinutes)
 
@@ -1191,6 +1284,13 @@ try {
     }
 
     $script:InstallationId = Get-InstallationId
+    if (-not $DryRun) {
+        $startupDelay = Get-Random -Minimum 0 -Maximum 31
+        if ($startupDelay -gt 0) {
+            Write-Log "Startup request spread delay: $startupDelay seconds"
+            Start-Sleep -Seconds $startupDelay
+        }
+    }
     Write-Log 'SchoolSync started'
     $ServerUrl = Get-ControlServerUrl -ProvidedUrl $ServerUrl
     if ($ServerUrl) {
@@ -1247,10 +1347,11 @@ try {
 
         if ((Get-Date) -lt $startTime) {
             Write-Log "Waiting for schedule: $($sessionConfig.name)"
-            $fileSyncCountdown = 6
-            $heartbeatCountdown = 3
-            $updateCountdown = 6
-            $configRefreshCountdown = 1
+            $fileSyncCountdown = 60
+            $heartbeatCountdown = 12
+            $updateCountdown = 60
+            $configRefreshCountdown = 12
+            $commandCountdown = 1
             $scheduleCancelled = $false
             while ((Get-Date) -lt $startTime) {
                 $configRefreshCountdown--
@@ -1269,29 +1370,33 @@ try {
                     } catch {
                         Write-Log "Waiting schedule refresh failed; keeping the last valid config: $($_.Exception.Message)"
                     }
-                    $configRefreshCountdown = 1
+                    $configRefreshCountdown = 12
                 }
 
-                Invoke-RemoteCommands -ServerUrl $ServerUrl
+                $commandCountdown--
+                if ($commandCountdown -le 0) {
+                    Invoke-RemoteCommands -ServerUrl $ServerUrl
+                    $commandCountdown = 2
+                }
                 $updateCountdown--
                 if ($updateCountdown -le 0) {
                     if (Invoke-SelfUpdate -ServerUrl $ServerUrl -QuietWhenCurrent) {
                         $script:RestartRequested = $true
                         return
                     }
-                    $updateCountdown = 6
+                    $updateCountdown = 60
                 }
                 $heartbeatCountdown--
                 if ($heartbeatCountdown -le 0) {
                     Invoke-Heartbeat -ServerUrl $ServerUrl
-                    $heartbeatCountdown = 3
+                    $heartbeatCountdown = 12
                 }
                 $fileSyncCountdown--
                 if ($fileSyncCountdown -le 0) {
                     Invoke-ResourceSync -ServerUrl $ServerUrl
                     Invoke-ClientFileSync -ServerUrl $ServerUrl
                     Invoke-Heartbeat -ServerUrl $ServerUrl
-                    $fileSyncCountdown = 6
+                    $fileSyncCountdown = 60
                 }
                 if ($DryRun) { break }
                 Start-Sleep -Seconds 10

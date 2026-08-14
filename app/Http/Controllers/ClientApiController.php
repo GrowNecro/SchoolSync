@@ -81,7 +81,7 @@ class ClientApiController extends Controller
         return response()->json([
             'ok' => true,
             'computer_id' => $computer->id,
-            'active_for_seconds' => 90,
+            'active_for_seconds' => 180,
             'approved' => $computer->approved,
             'pairing_status' => $computer->approved ? 'approved' : 'pending',
             'client_token' => $issuedToken,

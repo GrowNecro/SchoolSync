@@ -22,7 +22,7 @@ use Illuminate\View\View;
 
 class DashboardController extends Controller
 {
-    private const ACTIVE_COMPUTER_SECONDS = 90;
+    private const ACTIVE_COMPUTER_SECONDS = 180;
 
     private const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
@@ -91,14 +91,21 @@ class DashboardController extends Controller
 
     public function storeSchedule(Request $request): RedirectResponse
     {
-        ClassSchedule::query()->create($this->validatedScheduleData($request));
+        $schedule = ClassSchedule::query()->create($this->validatedScheduleData($request));
+        $this->queueScheduleRefresh($schedule);
 
         return redirect()->route('schedules')->with('success', 'Jadwal baru berhasil ditambahkan.');
     }
 
     public function updateSchedule(Request $request, ClassSchedule $schedule): RedirectResponse
     {
+        $previousTarget = [$schedule->target_type, $schedule->target_value];
         $schedule->update($this->validatedScheduleData($request));
+        $this->queueScheduleRefresh($schedule);
+        $currentTarget = [$schedule->target_type, $schedule->target_value];
+        if ($previousTarget !== $currentTarget) {
+            $this->queueCommandForTarget('refresh_exam_policy', ['schedule_id' => $schedule->id], ...$previousTarget);
+        }
 
         return redirect()->route('schedules')->with('success', "Jadwal {$schedule->name} berhasil diperbarui.");
     }
@@ -110,17 +117,20 @@ class DashboardController extends Controller
         ]);
         $enabled = (bool) $validated['exam_enabled'];
         $schedule->update(['exam_enabled' => $enabled]);
+        $this->queueScheduleRefresh($schedule);
 
         return redirect()->route('schedules')->with(
             'success',
-            'Mode ujian '.$schedule->name.' '.($enabled ? 'diaktifkan' : 'dinonaktifkan').'. Klien menerapkan perubahan maksimal sekitar 10 detik.'
+            'Mode ujian '.$schedule->name.' '.($enabled ? 'diaktifkan' : 'dinonaktifkan').'. Sinyal pembaruan sudah dikirim ke komputer target.'
         );
     }
 
     public function deleteSchedule(ClassSchedule $schedule): RedirectResponse
     {
         $name = $schedule->name;
+        $target = [$schedule->target_type, $schedule->target_value];
         $schedule->delete();
+        $this->queueCommandForTarget('refresh_exam_policy', ['schedule_id' => $schedule->id], ...$target);
 
         return redirect()->route('schedules')->with('success', "Jadwal {$name} berhasil dihapus.");
     }
@@ -433,8 +443,14 @@ class DashboardController extends Controller
 
     private function queueCommand(string $action, array $payload, string $target, int $expiresInMinutes = 10): RemoteCommand
     {
-        RemoteCommand::query()->where('expires_at', '<', now()->subDay())->delete();
         [$targetType, $targetValue] = $this->parseCommandTarget($target);
+
+        return $this->queueCommandForTarget($action, $payload, $targetType, $targetValue, $expiresInMinutes);
+    }
+
+    private function queueCommandForTarget(string $action, array $payload, string $targetType, ?array $targetValue, int $expiresInMinutes = 10): RemoteCommand
+    {
+        RemoteCommand::query()->where('expires_at', '<', now()->subDay())->delete();
 
         return DB::transaction(function () use ($action, $payload, $targetType, $targetValue, $expiresInMinutes): RemoteCommand {
             $command = RemoteCommand::query()->create([
@@ -454,6 +470,16 @@ class DashboardController extends Controller
 
             return $command;
         });
+    }
+
+    private function queueScheduleRefresh(ClassSchedule $schedule): void
+    {
+        $this->queueCommandForTarget(
+            'refresh_exam_policy',
+            ['schedule_id' => $schedule->id, 'enabled' => $schedule->exam_enabled],
+            $schedule->target_type,
+            $schedule->target_value
+        );
     }
 
     private function commandTargetOptions(): array
