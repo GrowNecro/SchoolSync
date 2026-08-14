@@ -32,12 +32,16 @@ class DashboardController extends Controller
     {
         $setting = Setting::query()->with('project')->firstOrCreate([], Setting::defaults());
         $projects = Project::query()->latest('updated_at')->get();
+        $activeSchedules = ClassSchedule::query()->where('enabled', true)->get();
 
         return view('dashboard', [
             'setting' => $setting,
             'projects' => $projects,
             'days' => $this->dayLabels(),
-            'scheduleCount' => ClassSchedule::query()->where('enabled', true)->count(),
+            'scheduleCount' => $activeSchedules->count(),
+            'scheduledLauncherCount' => $activeSchedules->pluck('launcher')->flatten()->filter()->unique()->count(),
+            'scheduledBrowserCount' => $activeSchedules->pluck('browser')->flatten()->filter()->unique()->count(),
+            'scheduledProjectCount' => $activeSchedules->pluck('project_id')->filter()->unique()->count(),
             'commandTargets' => $this->commandTargetOptions(),
             'recentCommands' => RemoteCommand::query()->with('executions')->latest()->limit(8)->get(),
             ...$this->computerStatusData(),
@@ -50,28 +54,10 @@ class DashboardController extends Controller
             ->header('Cache-Control', 'no-store, max-age=0');
     }
 
-    public function settingsPage(): View
-    {
-        $setting = Setting::query()->with('project')->firstOrCreate([], Setting::defaults());
-        $projects = Project::query()->latest('updated_at')->get();
-
-        return view('settings', [
-            'setting' => $setting,
-            'robloxProjects' => $projects->filter(
-                fn (Project $project): bool => in_array(strtolower(pathinfo($project->filename, PATHINFO_EXTENSION)), ['rbxl', 'rbxlx'], true)
-            ),
-            'days' => $this->dayLabels(),
-            'launchers' => [
-                'edge' => 'Microsoft Edge', 'roblox' => 'Roblox Studio', 'vscode' => 'Visual Studio Code',
-                'scratch' => 'Scratch Desktop', 'construct' => 'Construct 3', 'python' => 'Python IDLE',
-            ],
-            'computerNames' => ClientComputer::query()->distinct()->orderBy('computer_name')->pluck('computer_name'),
-        ]);
-    }
-
     public function schedulesPage(): View
     {
         return view('schedules', [
+            'setting' => Setting::query()->firstOrCreate([], Setting::defaults()),
             'schedules' => ClassSchedule::query()->with('project')->orderBy('schedule_day')->orderBy('start_time')->get(),
             'projects' => Project::query()->orderBy('filename')->get(),
             'days' => $this->dayLabels(),
@@ -80,7 +66,27 @@ class DashboardController extends Controller
                 'scratch' => 'Scratch Desktop', 'construct' => 'Construct 3', 'python' => 'Python IDLE',
             ],
             'commandTargets' => $this->commandTargetOptions(),
+            'computerNames' => ClientComputer::query()->distinct()->orderBy('computer_name')->pluck('computer_name'),
         ]);
+    }
+
+    public function updateShutdownExclusions(Request $request): RedirectResponse
+    {
+        $validated = $request->validate([
+            'shutdown_excluded_computers' => ['nullable', 'array', 'max:200'],
+            'shutdown_excluded_computers.*' => ['string', 'max:100', 'not_regex:/[\x00-\x1F\x7F]/'],
+            'shutdown_excluded_manual' => ['nullable', 'string', 'max:10000'],
+        ]);
+        $excludedComputers = $this->uniqueComputerNames(array_merge(
+            $validated['shutdown_excluded_computers'] ?? [],
+            preg_split('/\R/u', (string) ($validated['shutdown_excluded_manual'] ?? '')) ?: []
+        ));
+
+        Setting::query()->firstOrCreate([], Setting::defaults())->update([
+            'shutdown_excluded_computers' => $excludedComputers,
+        ]);
+
+        return redirect()->route('schedules')->with('success', 'Pengecualian shutdown berhasil disimpan.');
     }
 
     public function storeSchedule(Request $request): RedirectResponse
@@ -321,7 +327,7 @@ class DashboardController extends Controller
             ]
         );
 
-        return redirect()->route('settings')->with('success', 'Konfigurasi berhasil disimpan dan siap dibaca komputer lab.');
+        return redirect()->route('schedules')->with('success', 'Konfigurasi berhasil disimpan dan siap dibaca komputer lab.');
     }
 
     public function uploadProject(Request $request): RedirectResponse

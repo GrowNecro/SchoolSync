@@ -14,9 +14,10 @@ Route::get('/installer', [ClientApiController::class, 'installer'])->middleware(
 
 Route::middleware('auth')->group(function (): void {
     Route::get('/', [DashboardController::class, 'index'])->name('dashboard');
-    Route::get('/settings', [DashboardController::class, 'settingsPage'])->name('settings');
+    Route::redirect('/settings', '/schedules')->name('settings');
     Route::get('/schedules', [DashboardController::class, 'schedulesPage'])->name('schedules');
     Route::post('/schedules', [DashboardController::class, 'storeSchedule'])->name('schedules.store');
+    Route::put('/schedules/shutdown-exclusions', [DashboardController::class, 'updateShutdownExclusions'])->name('schedules.exclusions.update');
     Route::put('/schedules/{schedule}', [DashboardController::class, 'updateSchedule'])->name('schedules.update');
     Route::delete('/schedules/{schedule}', [DashboardController::class, 'deleteSchedule'])->name('schedules.destroy');
     Route::get('/files', [DashboardController::class, 'filesPage'])->name('files');

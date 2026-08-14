@@ -10,13 +10,13 @@
             <h1>Ruang kelas siap,<br>sebelum siswa masuk.</h1>
             <p>Atur komputer laboratorium, kirim file, dan buka materi di Edge langsung dari panel Laravel ini.</p>
         </div>
-        <div class="hero-status"><span>Status konfigurasi</span><strong><i></i> Siap digunakan</strong><small>Terakhir disimpan {{ $setting->updated_at->timezone('Asia/Jakarta')->format('d M Y, H:i') }} WIB</small></div>
+        <div class="hero-status"><span>Status konfigurasi</span><strong><i></i> Siap digunakan</strong><small>{{ $scheduleCount }} jadwal kelas aktif</small></div>
     </section>
 
     <section class="metrics">
-        <article><span>Jadwal aktif</span><strong>{{ $scheduleCount }} sesi</strong><small>Jadwal utama {{ $days[$setting->schedule_day] ?? '-' }} · {{ substr($setting->start_time, 0, 5) }}—{{ substr($setting->end_time, 0, 5) }} WIB</small></article>
-        <article><span>File tersedia</span><strong>{{ $projects->count() }} file</strong><small>{{ $setting->project?->filename ?? 'Belum ada proyek aktif' }}</small></article>
-        <article><span>Otomatisasi</span><strong>{{ count($setting->launcher ?? []) }} aplikasi</strong><small>{{ count($setting->browser ?? []) }} website terjadwal</small></article>
+        <article><span>Jadwal aktif</span><strong>{{ $scheduleCount }} sesi</strong><small>Dikelola seluruhnya melalui Multi-jadwal</small></article>
+        <article><span>File tersedia</span><strong>{{ $projects->count() }} file</strong><small>{{ $scheduledProjectCount }} proyek dipakai jadwal aktif</small></article>
+        <article><span>Otomatisasi</span><strong>{{ $scheduledLauncherCount }} aplikasi</strong><small>{{ $scheduledBrowserCount }} website terjadwal</small></article>
         <article><span>Komputer aktif</span><strong><span data-active-count>{{ $active_count }}</span> komputer</strong><small>Dari <span data-total-count>{{ $total_count }}</span> komputer terdaftar</small></article>
     </section>
 

@@ -167,9 +167,10 @@ class SchoolSyncTest extends TestCase
         $user = User::factory()->create();
         Setting::query()->create(Setting::defaults());
 
-        foreach (['/', '/settings', '/files', '/client-files', '/computers', '/activity', '/connection', '/security'] as $page) {
+        foreach (['/', '/schedules', '/files', '/client-files', '/computers', '/activity', '/connection', '/security'] as $page) {
             $this->actingAs($user)->get($page)->assertOk();
         }
+        $this->actingAs($user)->get('/settings')->assertRedirect('/schedules');
 
         $this->actingAs($user)->post('/actions/open-url', [
             'url' => 'materi scratch kelas 8',
@@ -424,6 +425,35 @@ class SchoolSyncTest extends TestCase
                 'name' => 'Ujian Kelas 9',
                 'exam' => ['enabled' => true, 'blocked_processes' => ['discord', 'steam']],
             ]);
+    }
+
+    public function test_old_settings_page_redirects_to_schedules_and_shutdown_exclusions_live_there(): void
+    {
+        ClientComputer::query()->create([
+            'installation_id' => (string) Str::uuid(),
+            'computer_name' => 'LAB-GURU',
+            'approved' => true,
+            'last_seen_at' => now(),
+        ]);
+        Setting::query()->create(Setting::defaults());
+        $admin = User::factory()->create();
+
+        $this->actingAs($admin)->get('/settings')->assertRedirect('/schedules');
+        $this->actingAs($admin)->get(route('schedules'))
+            ->assertOk()
+            ->assertSee('Pengecualian shutdown')
+            ->assertSee('Mode ujian')
+            ->assertDontSee('Pengaturan kelas');
+
+        $this->actingAs($admin)->put(route('schedules.exclusions.update'), [
+            'shutdown_excluded_computers' => ['LAB-GURU'],
+            'shutdown_excluded_manual' => "SERVER-KELAS\nlab-guru",
+        ])->assertSessionHasNoErrors()->assertRedirect(route('schedules'));
+
+        $this->assertSame(
+            ['LAB-GURU', 'SERVER-KELAS'],
+            Setting::query()->firstOrFail()->shutdown_excluded_computers
+        );
     }
 
     private function authenticatedClient(string $name = 'LAB-PC-TEST', ?string $group = null): array

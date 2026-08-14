@@ -14,7 +14,6 @@
         <span class="sidebar-label">Control center</span>
         <nav>
             <a class="{{ request()->routeIs('dashboard') ? 'active' : '' }}" href="{{ route('dashboard') }}">Dashboard</a>
-            <a class="{{ request()->routeIs('settings*') ? 'active' : '' }}" href="{{ route('settings') }}">Pengaturan kelas</a>
             <a class="{{ request()->routeIs('schedules*') ? 'active' : '' }}" href="{{ route('schedules') }}">Multi-jadwal</a>
             <a class="{{ request()->routeIs('files') ? 'active' : '' }}" href="{{ route('files') }}">File &amp; proyek</a>
             <a class="{{ request()->routeIs('client-files*') ? 'active' : '' }}" href="{{ route('client-files') }}">File dari komputer</a>
