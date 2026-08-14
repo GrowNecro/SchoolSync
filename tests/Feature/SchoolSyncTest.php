@@ -368,7 +368,7 @@ class SchoolSyncTest extends TestCase
             ->assertSee('Menyala');
     }
 
-    public function test_new_client_pairing_requires_admin_approval_and_reports_inventory(): void
+    public function test_new_client_pairing_is_approved_by_default_and_reports_inventory(): void
     {
         Setting::query()->create(Setting::defaults());
         $installationId = (string) Str::uuid();
@@ -384,7 +384,7 @@ class SchoolSyncTest extends TestCase
                 'disk_free_gb' => 120.5,
                 'roblox_studio' => true,
             ],
-        ])->assertOk()->assertJson(['approved' => false, 'pairing_status' => 'pending']);
+        ])->assertOk()->assertJson(['approved' => true, 'pairing_status' => 'approved']);
         $token = $response->json('client_token');
         $this->assertNotEmpty($token);
 
@@ -403,9 +403,17 @@ class SchoolSyncTest extends TestCase
             'computer_name' => 'LAB-PAIRING',
             'pairing_capable' => true,
         ])->assertUnauthorized();
-        $this->withHeaders($headers)->getJson('/client/config?installation_id='.$installationId)->assertForbidden();
+        $this->withHeaders($headers)->getJson('/client/config?installation_id='.$installationId)
+            ->assertOk()
+            ->assertJsonPath('schedules', []);
 
         $admin = User::factory()->create();
+        $this->actingAs($admin)->put(route('computers.update', $computer), [
+            'group_name' => 'LAB-B',
+        ])->assertRedirect(route('computers'));
+        $this->assertFalse($computer->fresh()->approved);
+        $this->withHeaders($headers)->getJson('/client/config?installation_id='.$installationId)->assertForbidden();
+
         $this->actingAs($admin)->put(route('computers.update', $computer), [
             'approved' => '1',
             'group_name' => 'LAB-B',

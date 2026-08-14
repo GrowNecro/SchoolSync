@@ -60,7 +60,7 @@ Untuk Roblox Studio, klien mencari `RobloxStudioBeta.exe` pada `%LOCALAPPDATA%\R
 
 Folder kerja `C:\SchoolSync\projects` disinkronkan dua arah. File baru atau berubah dari komputer klien diunggah ke penyimpanan privat server berdasarkan nama dan identitas komputer, lalu dapat dilihat serta diunduh admin melalui halaman **File dari komputer**. Semua jenis file didukung hingga 100 MB per file.
 
-Klien 2.0.3 memakai pairing token per perangkat. Komputer baru harus disetujui admin sebelum menerima konfigurasi, file, atau perintah. Panel mendukung target semua komputer, grup, atau satu komputer; laporan hasil perintah; inventaris perangkat; riwayat versi file dan pemulihan; multi-jadwal; serta mode ujian berbasis pemblokiran proses selama sesi. Mode ujian dapat diaktifkan atau dimatikan dari kartu jadwal ketika sesi sedang berlangsung. Status mode diterapkan maksimal sekitar 10 detik, lalu proses SYSTEM mendeteksi Roblox Player setiap detik dan menutupnya otomatis tanpa menutup Roblox Studio.
+Klien 2.0.3 memakai pairing token per perangkat. Komputer baru otomatis disetujui untuk menerima konfigurasi, file, dan perintah; admin tetap dapat mencabut izin perangkat tertentu melalui menu **Komputer & grup**. Panel mendukung target semua komputer, grup, atau satu komputer; laporan hasil perintah; inventaris perangkat; riwayat versi file dan pemulihan; multi-jadwal; serta mode ujian berbasis pemblokiran proses selama sesi. Mode ujian dapat diaktifkan atau dimatikan dari kartu jadwal ketika sesi sedang berlangsung. Status mode diterapkan maksimal sekitar 10 detik, lalu proses SYSTEM mendeteksi Roblox Player setiap detik dan menutupnya otomatis tanpa menutup Roblox Studio.
 
 ## Push lokal ke GitHub
 
@@ -95,7 +95,7 @@ Updater tidak menjalankan `php artisan storage:link`. Untuk kompatibilitas share
 
 Updater akan berhenti jika repository hosting memiliki perubahan lokal atau file yang belum dilacak. Backup setiap deployment disimpan di `storage/app/deployment-backups`.
 
-Setelah pembaruan ke klien 2.0.3, buka menu **Komputer & grup**. Komputer yang sudah terdaftar sebelum migrasi tetap disetujui otomatis, sedangkan instalasi baru harus disetujui admin dan dapat dimasukkan ke grup sebelum menerima jadwal maupun perintah. Status setiap perintah dapat dipantau melalui menu **Aktivitas**.
+Setelah pembaruan ke klien 2.0.3, semua komputer lama yang masih menunggu dan semua instalasi baru otomatis disetujui. Gunakan menu **Komputer & grup** untuk memasukkan perangkat ke grup atau menonaktifkan izin perangkat tertentu. Status setiap perintah dapat dipantau melalui menu **Aktivitas**.
 
 Jika muncul `SQLSTATE[HY000] [1044]`, hubungkan ulang pengguna MySQL ke database dengan seluruh hak akses lalu jalankan `php artisan migrate --force`.
 

@@ -12,7 +12,7 @@ return new class extends Migration
         Schema::table('client_computers', function (Blueprint $table): void {
             $table->string('group_name', 100)->nullable()->index()->after('computer_name');
             $table->string('client_token_hash', 64)->nullable()->unique()->after('group_name');
-            $table->boolean('approved')->default(false)->index()->after('client_token_hash');
+            $table->boolean('approved')->default(true)->index()->after('client_token_hash');
             $table->timestamp('approved_at')->nullable()->after('approved');
             $table->json('inventory')->nullable()->after('version');
         });

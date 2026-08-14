@@ -4,7 +4,7 @@
 @section('section', 'KOMPUTER DAN GRUP')
 
 @section('content')
-    <section class="page-heading"><span class="eyebrow">Perangkat</span><h1>Komputer dan grup</h1><p>Setujui pairing, kelompokkan perangkat, dan pantau inventaris laboratorium.</p></section>
+    <section class="page-heading"><span class="eyebrow">Perangkat</span><h1>Komputer dan grup</h1><p>Komputer baru otomatis disetujui. Di sini Anda dapat mengelompokkan, memantau inventaris, atau menonaktifkan izin perangkat tertentu.</p></section>
 
     <div class="device-grid">
         @forelse ($computers as $computer)
@@ -21,7 +21,7 @@
                 <form method="post" action="{{ route('computers.update', $computer) }}" class="device-form">
                     @csrf @method('PUT')
                     <label>Nama grup<input type="text" name="group_name" value="{{ $computer->group_name }}" placeholder="LAB-A"></label>
-                    <label class="check compact-check"><input type="checkbox" name="approved" value="1" @checked($computer->approved)><span><b>Setujui komputer</b><small>Izinkan menerima konfigurasi dan perintah.</small></span></label>
+                    <label class="check compact-check"><input type="checkbox" name="approved" value="1" @checked($computer->approved)><span><b>Izinkan menerima perintah</b><small>Aktif secara default untuk setiap komputer baru.</small></span></label>
                     <label class="check compact-check"><input type="checkbox" name="reset_pairing" value="1"><span><b>Pairing ulang</b><small>Token baru dibuat saat heartbeat berikutnya.</small></span></label>
                     <button class="button secondary" type="submit">Simpan perangkat</button>
                 </form>

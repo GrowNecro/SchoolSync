@@ -41,7 +41,8 @@ class ClientApiController extends Controller
             ['installation_id' => $validated['installation_id']],
             [
                 'computer_name' => $validated['computer_name'],
-                'approved' => false,
+                'approved' => true,
+                'approved_at' => now(),
                 'last_seen_at' => now(),
             ]
         );
